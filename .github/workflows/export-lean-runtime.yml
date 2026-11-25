@@ -31,11 +31,11 @@ jobs:
           echo 'import Lean' > /tmp/LeanRuntimeSmoke.lean
           echo 'example : (2 : Nat) + 2 = 4 := by omega' >> /tmp/LeanRuntimeSmoke.lean
           /tmp/lean-runtime/bin/lean /tmp/LeanRuntimeSmoke.lean
-          tar -C /tmp -czf /tmp/lean-runtime.tar.gz lean-runtime
-          sha256sum /tmp/lean-runtime.tar.gz | cut -d ' ' -f 1 > export/sha256.txt
-          split -b 16M -d -a 2 /tmp/lean-runtime.tar.gz export/chunk-
-          test "$(find export -name 'chunk-*' | wc -l)" -le 16
+          tar -C /tmp -cf - lean-runtime | zstd -T2 -3 -o /tmp/lean-runtime.tar.zst
+          sha256sum /tmp/lean-runtime.tar.zst | cut -d ' ' -f 1 > export/sha256.txt
+          split -b 24M -d -a 2 /tmp/lean-runtime.tar.zst export/chunk-
           ls -lh export
+          test "$(find export -name 'chunk-*' | wc -l)" -le 32
       - uses: actions/upload-artifact@v4
         with:
           name: lean-runtime-manifest
@@ -151,5 +151,117 @@ jobs:
         with:
           name: lean-runtime-15
           path: export/chunk-15
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-16') != '' }}
+        with:
+          name: lean-runtime-16
+          path: export/chunk-16
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-17') != '' }}
+        with:
+          name: lean-runtime-17
+          path: export/chunk-17
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-18') != '' }}
+        with:
+          name: lean-runtime-18
+          path: export/chunk-18
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-19') != '' }}
+        with:
+          name: lean-runtime-19
+          path: export/chunk-19
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-20') != '' }}
+        with:
+          name: lean-runtime-20
+          path: export/chunk-20
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-21') != '' }}
+        with:
+          name: lean-runtime-21
+          path: export/chunk-21
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-22') != '' }}
+        with:
+          name: lean-runtime-22
+          path: export/chunk-22
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-23') != '' }}
+        with:
+          name: lean-runtime-23
+          path: export/chunk-23
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-24') != '' }}
+        with:
+          name: lean-runtime-24
+          path: export/chunk-24
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-25') != '' }}
+        with:
+          name: lean-runtime-25
+          path: export/chunk-25
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-26') != '' }}
+        with:
+          name: lean-runtime-26
+          path: export/chunk-26
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-27') != '' }}
+        with:
+          name: lean-runtime-27
+          path: export/chunk-27
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-28') != '' }}
+        with:
+          name: lean-runtime-28
+          path: export/chunk-28
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-29') != '' }}
+        with:
+          name: lean-runtime-29
+          path: export/chunk-29
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-30') != '' }}
+        with:
+          name: lean-runtime-30
+          path: export/chunk-30
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-31') != '' }}
+        with:
+          name: lean-runtime-31
+          path: export/chunk-31
           compression-level: 0
           retention-days: 1
