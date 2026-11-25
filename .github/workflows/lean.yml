@@ -1,0 +1,31 @@
+name: Lean verification
+on:
+  push:
+    branches:
+      - lean-verification
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  kernel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Lean
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/leanprover/elan/v4.4.0/elan-init.sh | sh -s -- -y --default-toolchain leanprover/lean4:v4.19.0
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Verify generic arithmetic lemmas
+        shell: bash
+        run: |
+          set -euo pipefail
+          lean --version
+          lean -DwarningAsError=true LeanSmoke.lean | tee lean.log
+          if grep -Eq 'sorryAx|ofReduceBool' lean.log; then exit 1; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lean-log
+          path: lean.log
