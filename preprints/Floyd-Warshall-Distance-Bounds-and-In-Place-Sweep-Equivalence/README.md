@@ -6,4 +6,4 @@ If the initial matrix is no larger than the cost of every directed graph edge an
 
 The Lean development proves these facts by structural induction; it does not assume that the computed matrix is an exact shortest-path oracle. Exact realization of each finite label by a concrete path is a separate property not claimed here.
 
-[Lean source](../../lean/Math/FloydWarshallDistanceBounds.lean). Theorems are generic and independent of any external implementation. Status: pending verification.
+[Lean source](../../lean/Math/FloydWarshallDistanceBounds.lean). Theorems are generic and independent of any external implementation. Status: [Lean 4.19.0 kernel verified](https://github.com/NRG-Wardog/math/actions/runs/45701291726); six audited declarations, successful Lake build. This verifies the generic model, not a Python implementation.
