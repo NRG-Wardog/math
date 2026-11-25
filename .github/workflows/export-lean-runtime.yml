@@ -1,0 +1,155 @@
+name: Export pinned public Lean runtime
+on:
+  push:
+    branches: [lean-runtime]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Install Lean
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/leanprover/elan/v4.4.0/elan-init.sh | sh -s -- -y --default-toolchain leanprover/lean4:v4.19.0
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Export only public toolchain files
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="$(lean --print-prefix)"
+          lean --version
+          ldd "$prefix/bin/lean"
+          mkdir -p /tmp/lean-runtime/bin /tmp/lean-runtime/lib export
+          cp -L "$prefix/bin/lean" /tmp/lean-runtime/bin/lean
+          cp -a "$prefix/lib/lean" /tmp/lean-runtime/lib/
+          find /tmp/lean-runtime/lib/lean -type f \( -name '*.a' -o -name '*.ilean' -o -name '*.c' -o -name '*.o' -o -name '*.bc' \) -delete
+          find "$prefix/lib" -maxdepth 1 \( -type f -o -type l \) -name '*.so*' -exec cp -a {} /tmp/lean-runtime/lib/ \;
+          /tmp/lean-runtime/bin/lean --version
+          echo 'import Lean' > /tmp/LeanRuntimeSmoke.lean
+          echo 'example : (2 : Nat) + 2 = 4 := by omega' >> /tmp/LeanRuntimeSmoke.lean
+          /tmp/lean-runtime/bin/lean /tmp/LeanRuntimeSmoke.lean
+          tar -C /tmp -czf /tmp/lean-runtime.tar.gz lean-runtime
+          sha256sum /tmp/lean-runtime.tar.gz | cut -d ' ' -f 1 > export/sha256.txt
+          split -b 16M -d -a 2 /tmp/lean-runtime.tar.gz export/chunk-
+          test "$(find export -name 'chunk-*' | wc -l)" -le 16
+          ls -lh export
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lean-runtime-manifest
+          path: export/sha256.txt
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-00') != '' }}
+        with:
+          name: lean-runtime-00
+          path: export/chunk-00
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-01') != '' }}
+        with:
+          name: lean-runtime-01
+          path: export/chunk-01
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-02') != '' }}
+        with:
+          name: lean-runtime-02
+          path: export/chunk-02
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-03') != '' }}
+        with:
+          name: lean-runtime-03
+          path: export/chunk-03
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-04') != '' }}
+        with:
+          name: lean-runtime-04
+          path: export/chunk-04
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-05') != '' }}
+        with:
+          name: lean-runtime-05
+          path: export/chunk-05
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-06') != '' }}
+        with:
+          name: lean-runtime-06
+          path: export/chunk-06
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-07') != '' }}
+        with:
+          name: lean-runtime-07
+          path: export/chunk-07
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-08') != '' }}
+        with:
+          name: lean-runtime-08
+          path: export/chunk-08
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-09') != '' }}
+        with:
+          name: lean-runtime-09
+          path: export/chunk-09
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-10') != '' }}
+        with:
+          name: lean-runtime-10
+          path: export/chunk-10
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-11') != '' }}
+        with:
+          name: lean-runtime-11
+          path: export/chunk-11
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-12') != '' }}
+        with:
+          name: lean-runtime-12
+          path: export/chunk-12
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-13') != '' }}
+        with:
+          name: lean-runtime-13
+          path: export/chunk-13
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-14') != '' }}
+        with:
+          name: lean-runtime-14
+          path: export/chunk-14
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: ${{ hashFiles('export/chunk-15') != '' }}
+        with:
+          name: lean-runtime-15
+          path: export/chunk-15
+          compression-level: 0
+          retention-days: 1
