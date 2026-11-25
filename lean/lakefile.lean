@@ -1,0 +1,7 @@
+import Lake
+open Lake DSL
+
+package «math» where
+
+@[default_target]
+lean_lib Math where

@@ -1,8 +1,7 @@
 name: Lean verification
 on:
   push:
-    branches:
-      - lean-verification
+    branches: [lean-verification]
   workflow_dispatch:
 permissions:
   contents: read
@@ -17,13 +16,32 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/leanprover/elan/v4.4.0/elan-init.sh | sh -s -- -y --default-toolchain leanprover/lean4:v4.19.0
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-      - name: Verify generic arithmetic lemmas
+      - name: Verify theorem modules and audit axioms
         shell: bash
         run: |
           set -euo pipefail
+          cd lean
           lean --version
-          lean -DwarningAsError=true LeanSmoke.lean | tee lean.log
-          if grep -Eq 'sorryAx|ofReduceBool' lean.log; then exit 1; fi
+          lean -DwarningAsError=true Math/AdmissibilityOfCostPartitionedBellmanPotentials.lean | tee ../lean.log
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          allowed = {'propext', 'Quot.sound', 'Classical.choice'}
+          expected = {'bellman_admissible','abstraction_admissible','sum_step','sum_zero','additive_admissible','maximum_budget','maximum_admissible'}
+          found = set()
+          for line in Path('../lean.log').read_text().splitlines():
+              match = re.match(r"^'([^']+)' depends on axioms: \[([^\]]*)\]", line)
+              if match:
+                  name, axioms = match.groups()
+                  assert not ({a.strip() for a in axioms.split(',') if a.strip()} - allowed), line
+                  found.add(name.split('.')[-1])
+              else:
+                  match = re.match(r"^'([^']+)' does not depend on any axioms", line)
+                  if match: found.add(match.group(1).split('.')[-1])
+          assert expected <= found, f'Missing audits: {expected-found}'
+          print('All seven declarations audited; no additional axioms.')
+          PY
+          lake build
       - uses: actions/upload-artifact@v4
         if: always()
         with:
