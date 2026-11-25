@@ -18,4 +18,4 @@ These are general, standard mathematical results, not a claim of novelty. The hy
 
 **Scope:** the general theorems only. The mathematical statements do not verify any particular solver or its implementation.
 
-**Status:** awaiting the kernel run for this revision.
+**Status:** [Kernel verified](https://github.com/NRG-Wardog/math/actions/runs/45700830958), Lean 4.19.0; seven audited declarations and successful Lake build.
