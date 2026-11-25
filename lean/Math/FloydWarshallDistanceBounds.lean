@@ -72,7 +72,7 @@ theorem distMin_repeat (a b : Distance) :
 
 theorem distMin_choice (a b : Distance) : distMin a b = a ∨ distMin a b = b := by
   cases a with
-  | none => exact Or.inr rfl
+  | none => exact Or.inr (by cases b <;> rfl)
   | some x =>
     cases b with
     | none => exact Or.inl rfl
@@ -186,8 +186,16 @@ theorem fwSweep_entry (d : Matrix) (k : Nat) (cells : List (Nat × Nat))
     by_cases hm : (a,b) ∈ rest
     · simp [hm, fwCell_step_stable d k ij hd a b]
     · by_cases heq : (a,b) = ij
-      · simp [hm, heq, fwCell]
-      · simp [hm, heq, fwCell]
+      · have hmem : (a,b) ∈ ij :: rest := List.mem_cons.mpr (Or.inl heq)
+        rw [if_neg hm, if_pos hmem]
+        exact if_pos heq
+      · have hmem : ¬ (a,b) ∈ ij :: rest := by
+          intro h
+          rcases List.mem_cons.mp h with hEq | hTail
+          · exact heq hEq
+          · exact hm hTail
+        rw [if_neg hm, if_neg hmem]
+        exact if_neg heq
 
 theorem fwSweep_complete (d : Matrix) (k : Nat) (cells : List (Nat × Nat))
     (hd : ZeroDiagonal d) (a b : Nat) (visited : (a,b) ∈ cells) :
