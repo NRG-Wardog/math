@@ -3078,7 +3078,7 @@ def traceCarrier (w : World) {s u : State} {m h : Nat}
     (tr : LegalTrace w s u m h) (p : Nat) : Option Nat :=
   match tr with
   | .nil s => jobOwner s p
-  | @LegalTrace.cons _ s v u a b m h st tail =>
+  | @LegalTrace.cons _ s _ u a b m h st tail =>
     match s.parcel p with
     | .onTruck t => some t
     | .ground _ => traceCarrier w tail p
@@ -3162,7 +3162,7 @@ theorem truck_crossing_group (w : World) (side : Nat → Bool) (t : Nat)
     exact Nat.le_trans (selectedWeight_carrier_le w s t sel (fun p hp hs => (holds p hp hs).1)) (vl t ht)
   · have hz : truckIn side t s v = 0 := by
       unfold truckIn at *
-      split at hc ⊢ <;> simp_all
+      cases h1 : side (physicalTruck s t) <;> cases h2 : side (physicalTruck v t) <;> simp_all
     have hzero : ∀ p, p < w.parcels → sel p = false := by
       intro p hp
       cases hs : sel p with
@@ -3231,7 +3231,7 @@ theorem trace_assigned_groups (w : World) (side : Nat → Bool) (t : Nat)
         intro p hp hs
         have hh : sel p = true ∧ side (physicalParcel v p) = true := by simpa [moved] using hs
         exact (owners p hp hh.1).1) moveCond
-    obtain ⟨rs,pr,fr,lr⟩ := ih (step_valid_load w st vl)
+    obtain ⟨rs,pr,fr,lr⟩ := ih done (step_valid_load w st vl)
       (step_valid_parcel_carriers w st vp) remain remOwn remCond
     refine ⟨gs++rs,?_,?_,?_⟩
     · have spl := selectedWeight_split w sel (fun p => side (physicalParcel v p))
