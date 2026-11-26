@@ -5610,3 +5610,148 @@ theorem admissible_le_optimum (w : World) (init : State) (estimate : State → N
 #print axioms weighted_reachable_admissible
 #print axioms admissible_le_optimum
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- The service recurrence operates on the same two bit masks as
+-- RouteDP.value: pending pickups and currently held selected parcels.
+-- The fixed source array represents the packed ground digits.
+structure RouteData where
+  parcels : Nat
+  weight : Nat → Nat
+  source : Nat → Vertex
+  target : Nat → Vertex
+  dist : Vertex → Vertex → Nat
+  zero : ∀ x, dist x x = 0
+  triangle : ∀ x y z, dist x z ≤ dist x y + dist y z
+
+def routeLoad (r : RouteData) (held : Nat) : Nat :=
+  sumN (fun p => if held.testBit p then r.weight p else 0) r.parcels
+
+def routeEvents (r : RouteData) (cap pick held : Nat) :
+    List (Vertex × Nat × Nat) :=
+  (((List.range r.parcels).filter (fun p => held.testBit p)).map
+    (fun p => (r.target p, pick, held ^^^ 2^p))) ++
+  (((List.range r.parcels).filter (fun p =>
+    pick.testBit p && decide (r.weight p ≤ cap - routeLoad r held))).map
+    (fun p => (r.source p, pick ^^^ 2^p, held ||| 2^p)))
+
+def routeRecurrence (r : RouteData) (cap top : Nat) :
+    Nat → Vertex → Nat → Nat → Nat
+  | 0, _, pick, held => if pick = 0 ∧ held = 0 then 0 else top
+  | fuel+1, start, pick, held =>
+    if pick = 0 ∧ held = 0 then 0
+    else exactCutMin top ((routeEvents r cap pick held).map (fun e =>
+      r.dist start e.1 + routeRecurrence r cap top fuel e.1 e.2.1 e.2.2))
+
+theorem route_event_delivery (r : RouteData) (cap pick held p : Nat)
+    (hp : p < r.parcels) (hh : held.testBit p = true) :
+    (r.target p,pick,held ^^^ 2^p) ∈ routeEvents r cap pick held := by
+  unfold routeEvents
+  apply List.mem_append.mpr
+  left
+  apply List.mem_map.mpr
+  exact ⟨p,by simp [hp,hh],rfl⟩
+
+theorem route_event_pickup (r : RouteData) (cap pick held p : Nat)
+    (hp : p < r.parcels) (hh : pick.testBit p = true)
+    (fit : r.weight p ≤ cap - routeLoad r held) :
+    (r.source p,pick ^^^ 2^p,held ||| 2^p) ∈ routeEvents r cap pick held := by
+  unfold routeEvents
+  apply List.mem_append.mpr
+  right
+  apply List.mem_map.mpr
+  exact ⟨p,by simp [hp,hh,fit],rfl⟩
+
+theorem route_recurrence_empty (r : RouteData) (cap top fuel : Nat) (start : Vertex) :
+    routeRecurrence r cap top fuel start 0 0 = 0 := by
+  cases fuel <;> simp [routeRecurrence]
+
+theorem route_recurrence_event (r : RouteData) (cap top fuel pick held : Nat)
+    (start loc : Vertex) (p2 h2 : Nat)
+    (notDone : ¬ (pick = 0 ∧ held = 0))
+    (member : (loc,p2,h2) ∈ routeEvents r cap pick held) :
+    routeRecurrence r cap top (fuel+1) start pick held ≤
+      r.dist start loc + routeRecurrence r cap top fuel loc p2 h2 := by
+  rw [routeRecurrence,if_neg notDone]
+  apply exactCutMin_le_member
+  exact List.mem_map.mpr ⟨(loc,p2,h2),member,rfl⟩
+
+-- An execution consists of actual movements, interspersed with the
+-- individual pickup/delivery events in the recurrence. The movement
+-- edge may have a larger charge than the relaxed metric.
+inductive RouteExecution (r : RouteData) (cap : Nat) :
+    Vertex → Nat → Nat → Nat → Nat → Prop where
+  | done (loc : Vertex) : RouteExecution r cap loc 0 0 0 0
+  | travel {a b : Vertex} {pick held n cost charge : Nat} :
+      r.dist a b ≤ charge →
+      RouteExecution r cap b pick held n cost →
+      RouteExecution r cap a pick held n (charge+cost)
+  | service {loc : Vertex} {pick held p2 h2 n cost : Nat} :
+      ¬ (pick = 0 ∧ held = 0) →
+      (loc,p2,h2) ∈ routeEvents r cap pick held →
+      RouteExecution r cap loc p2 h2 n cost →
+      RouteExecution r cap loc pick held (n+1) cost
+
+-- No assumption that the recurrence is a lower bound: every legal
+-- service choice is shown to be present, and the triangle inequality
+-- compresses arbitrary real movements into the milestone distance.
+theorem route_recurrence_le_execution (r : RouteData) (cap top : Nat)
+    {loc : Vertex} {pick held n cost : Nat}
+    (execution : RouteExecution r cap loc pick held n cost)
+    (fuel : Nat) (enough : n ≤ fuel) (start : Vertex) :
+    routeRecurrence r cap top fuel start pick held ≤ r.dist start loc + cost := by
+  induction execution generalizing fuel start with
+  | done loc => rw [route_recurrence_empty]; exact Nat.zero_le _
+  | @travel a b pick held n cost charge edge tail ih =>
+    have h := ih fuel enough start
+    have ht := r.triangle start a b
+    omega
+  | @service loc pick held p2 h2 n cost notDone member tail ih =>
+    cases fuel with
+    | zero => omega
+    | succ k =>
+      have h1 := route_recurrence_event r cap top k pick held start loc p2 h2 notDone member
+      have h2 := ih k (by omega) loc
+      rw [r.zero loc,Nat.zero_add] at h2
+      omega
+
+theorem route_recurrence_le_actual (r : RouteData) (cap top : Nat)
+    {loc : Vertex} {pick held n cost : Nat}
+    (execution : RouteExecution r cap loc pick held n cost)
+    (fuel : Nat) (enough : n ≤ fuel) :
+    routeRecurrence r cap top fuel loc pick held ≤ cost := by
+  have h := route_recurrence_le_execution r cap top execution fuel enough loc
+  rw [r.zero loc,Nat.zero_add] at h
+  exact h
+
+-- Exact finite row convolution used by both scalar and NumPy variants.
+def routeConvolution (top : Nat) (rows : List (Nat → Nat)) (mask : Nat) : Nat :=
+  match rows with
+  | [] => if mask = 0 then 0 else top
+  | row::rest => mergeValue top (routeConvolution top rest) row mask
+
+inductive RouteAllocation : List (Nat → Nat) → Nat → Nat → Prop where
+  | empty : RouteAllocation [] 0 0
+  | cons {row : Nat → Nat} {rows : List (Nat → Nat)} {mask sub cost : Nat} :
+      sub ≤ mask → sub &&& mask = sub →
+      RouteAllocation rows (mask ^^^ sub) cost →
+      RouteAllocation (row::rows) mask (cost+row sub)
+
+theorem route_convolution_witness (top : Nat)
+    {rows : List (Nat → Nat)} {mask cost : Nat}
+    (witness : RouteAllocation rows mask cost) :
+    routeConvolution top rows mask ≤ cost := by
+  induction witness with
+  | empty => simp [routeConvolution]
+  | @cons row rows mask sub cost le submask tail ih =>
+    have h := mergeValue_witness top (routeConvolution top rows) row mask sub le submask
+    change mergeValue top (routeConvolution top rows) row mask ≤ _
+    omega
+
+#print axioms route_event_delivery
+#print axioms route_event_pickup
+#print axioms route_recurrence_le_actual
+#print axioms route_convolution_witness
+end IslandLogistics
