@@ -734,7 +734,7 @@ theorem disconnected_three_cost :
   have e1 : Step disconnectedWorld disconnectedBad disconnectedLoaded 0 1 :=
     Step.load disconnectedBad 0 0 3 rfl rfl (by decide) (by decide)
   have e2 : Step disconnectedWorld disconnectedLoaded disconnectedDriven 1 0 :=
-    Step.drive disconnectedLoaded 0 3 2 rfl (by decide) (by decide)
+    Step.drive disconnectedLoaded 0 3 2 rfl (by change 3 < 4 ∧ 2 < 4 ∧ (3 + 1 = 2 ∨ 2 + 1 = 3); decide) (by decide)
   have e3 : Step disconnectedWorld disconnectedDriven disconnectedDone 0 1 :=
     Step.unload disconnectedDriven 0 0 2 rfl rfl (by decide)
   exact Path.cons e1 (Path.cons e2 (Path.cons e3 (Path.nil _)))
@@ -797,9 +797,9 @@ theorem disconnected_phantom_crossings (f1 f2 f3 : Int)
     3 ≤ disconnectedProfile 0 0 f1 +
       disconnectedProfile 0 0 f2 + disconnectedProfile 0 1 f3 := by
   unfold disconnectedProfile
-  have a := le_max_left (2 * (0 : Int) - (f1 - 2)) (2 * (0 : Int) + (f1 - 2))
-  have b := le_max_left (2 * (0 : Int) - (f2 - 2)) (2 * (0 : Int) + (f2 - 2))
-  have c := le_max_left (2 * (0 : Int) - (f3 - 2)) (2 * (1 : Int) + (f3 - 2))
+  have a := Int.le_max_left (2 * (0 : Int) - (f1 - 2)) (2 * (0 : Int) + (f1 - 2))
+  have b := Int.le_max_left (2 * (0 : Int) - (f2 - 2)) (2 * (0 : Int) + (f2 - 2))
+  have c := Int.le_max_left (2 * (0 : Int) - (f3 - 2)) (2 * (1 : Int) + (f3 - 2))
   omega
 
 theorem disconnected_phantom_exact :
