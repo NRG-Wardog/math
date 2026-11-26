@@ -6881,3 +6881,174 @@ theorem route_mode_transfer_admissible (w : World) (r : RouteData) (fmt : RouteF
 #print axioms route_mode_budget
 #print axioms route_mode_transfer_admissible
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+/- HeterogeneousPacking.extra: the capacities list represents the
+   remaining net-crossing trucks, in any fixed order with nonmaximum
+   capacities first. The integer mask identifies the exact parcel set.
+   All results here are inequalities against arbitrary feasible packings,
+   not assumptions that the recurrence computes an optimum. -/
+
+def maskWeights (w : World) (mask : Nat) : List Nat :=
+  selectedWeights w (fun p => mask.testBit p)
+
+def maskBin (w : World) (C : Nat) (seed : BinState) (mask : Nat) : Nat :=
+  (binDP C seed (maskWeights w mask).length (maskWeights w mask)).1
+
+theorem mask_weights_split (w : World) (mask sub : Nat)
+    (hs : maskWithin sub mask) :
+    List.Perm (maskWeights w mask)
+      (maskWeights w sub ++ maskWeights w (mask ^^^ sub)) := by
+  have h := selectedWeight_split w (fun p => mask.testBit p) (fun p => sub.testBit p)
+  have a : (fun p => mask.testBit p && sub.testBit p) = (fun p => sub.testBit p) := by
+    funext p
+    cases he : sub.testBit p
+    · simp
+    · simp [hs p he]
+  have b : (fun p => mask.testBit p && !sub.testBit p) =
+      (fun p => (mask ^^^ sub).testBit p) := by
+    funext p
+    cases he : sub.testBit p
+    · simp [Nat.testBit_xor,he]
+    · simp [Nat.testBit_xor,he,hs p he]
+  rw [a,b] at h
+  exact h
+
+theorem mask_weights_zero (w : World) : maskWeights w 0 = [] := by
+  apply selectedWeight_empty
+  intro p hp
+  simp
+
+-- Models the early exit "while sub and best > lower".  This lemma
+-- allows a witness anywhere in the enumerated list, even after exit.
+def stopMin (lower : Nat) (best : Nat) : List Nat → Nat
+  | [] => best
+  | x :: xs => if best ≤ lower then best else stopMin lower (min best x) xs
+
+theorem stopMin_le_seed (lower best : Nat) (xs : List Nat) :
+    stopMin lower best xs ≤ best := by
+  induction xs generalizing best with
+  | nil => simp [stopMin]
+  | cons x xs ih =>
+    rw [stopMin]
+    split
+    · exact Nat.le_refl _
+    · exact Nat.le_trans (ih _) (Nat.min_le_left _ _)
+
+theorem stopMin_le_witness (lower best z : Nat) (xs : List Nat)
+    (hz : z ∈ xs) : stopMin lower best xs ≤ max lower z := by
+  induction xs generalizing best with
+  | nil => simp at hz
+  | cons x xs ih =>
+    rw [stopMin]
+    split
+    · rename_i he
+      exact Nat.le_trans he (Nat.le_max_left _ _)
+    · rw [List.mem_cons] at hz
+      rcases hz with eq | rest
+      · subst z
+        exact Nat.le_trans (stopMin_le_seed _ _ _)
+          (Nat.le_trans (Nat.min_le_right _ _) (Nat.le_max_right _ _))
+      · exact ih _ rest
+
+def feasibleNetSubmasks (w : World) (cap mask : Nat) : List Nat :=
+  (submaskColumns mask).filter
+    (fun sub => sub != 0 && decide ((maskWeights w sub).sum ≤ cap))
+
+def heteroExtra (w : World) (C : Nat) (seed : BinState) :
+    List Nat → Nat → Nat
+  | [], mask => maskBin w C seed mask
+  | cap :: caps, mask =>
+    if mask = 0 then 0 else
+    if (cap::caps).all (fun c => c == C) then
+      maskBin w C seed mask - (cap::caps).length
+    else stopMin (maskBin w C seed mask - (cap::caps).length)
+      (heteroExtra w C seed caps mask)
+      ((feasibleNetSubmasks w cap mask).map
+        (fun sub => heteroExtra w C seed caps (mask ^^^ sub)))
+
+-- A witness assigns each net crossing a disjoint, capacity-feasible
+-- parcel subset (possibly empty). Every remaining parcel is assigned
+-- to an ordinary crossing of capacity at most C.
+inductive NetPacking (w : World) (C : Nat) :
+    List Nat → Nat → List (List Nat) → Prop where
+  | nil {mask groups} :
+      List.Perm (maskWeights w mask) groups.flatten →
+      (∀ g ∈ groups, g.sum ≤ C) →
+      NetPacking w C [] mask groups
+  | cons {cap caps mask sub groups} :
+      maskWithin sub mask → (maskWeights w sub).sum ≤ cap →
+      NetPacking w C caps (mask ^^^ sub) groups →
+      NetPacking w C (cap::caps) mask groups
+
+theorem net_packing_groups (w : World) (C : Nat)
+    {caps mask groups} (p : NetPacking w C caps mask groups)
+    (capBound : ∀ c ∈ caps, c ≤ C) :
+    ∃ net : List (List Nat), net.length = caps.length ∧
+      List.Perm (maskWeights w mask) (net++groups).flatten ∧
+      (∀ g ∈ net++groups, g.sum ≤ C) := by
+  induction p with
+  | nil perm fit => exact ⟨[],rfl,perm,fit⟩
+  | @cons cap caps mask sub groups hs fit tail ih =>
+    obtain ⟨net,len,perm,feasible⟩ :=
+      ih (fun c hc => capBound c (List.mem_cons_of_mem _ hc))
+    refine ⟨maskWeights w sub :: net,by simp [len],?_,?_⟩
+    · have hp := (mask_weights_split w mask sub hs).trans
+        (List.Perm.append (List.Perm.refl _) perm)
+      simpa [List.flatten] using hp
+    · intro g hg
+      change g ∈ maskWeights w sub :: (net++groups) at hg
+      rcases List.mem_cons.mp hg with eq | hg
+      · subst g
+        exact Nat.le_trans fit (capBound cap (by simp))
+      · exact feasible g hg
+
+theorem net_packing_bin_lower (w : World) (C : Nat) (seed : BinState)
+    {caps mask groups} (p : NetPacking w C caps mask groups)
+    (capBound : ∀ c ∈ caps, c ≤ C) :
+    maskBin w C seed mask ≤ caps.length + groups.length := by
+  obtain ⟨net,len,perm,feasible⟩ := net_packing_groups w C p capBound
+  have h := binDP_le_feasible_groups C seed (maskWeights w mask) (net++groups) perm feasible
+  simpa [maskBin,len] using h
+
+-- This is the precise safety property needed from the heterogeneous
+-- recurrence, including its all-max shortcut and early exit.
+theorem hetero_extra_le_packing (w : World) (C : Nat) (seed : BinState)
+    {caps mask groups} (p : NetPacking w C caps mask groups)
+    (capBound : ∀ c ∈ caps, c ≤ C) :
+    heteroExtra w C seed caps mask ≤ groups.length := by
+  induction p with
+  | @nil mask groups perm fit =>
+    exact binDP_le_feasible_groups C seed _ groups perm fit
+  | @cons cap caps mask sub groups hs fit tail ih =>
+    have hrec := ih (fun c hc => capBound c (List.mem_cons_of_mem _ hc))
+    have hwhole := net_packing_bin_lower w C seed (NetPacking.cons hs fit tail) capBound
+    have hlo : maskBin w C seed mask - (cap::caps).length ≤ groups.length := by omega
+    rw [heteroExtra]
+    split
+    · exact Nat.zero_le _
+    · split
+      · exact hlo
+      · by_cases hsub : sub = 0
+        · subst sub
+          simp at hrec
+          exact Nat.le_trans (stopMin_le_seed _ _ _) hrec
+        · have hmem : sub ∈ feasibleNetSubmasks w cap mask := by
+            apply List.mem_filter.mpr
+            exact ⟨submask_column_complete mask sub (Nat.le_of_testBit hs) (maskWithin_and hs),
+              by simp [hsub,fit]⟩
+          have h := stopMin_le_witness (maskBin w C seed mask - (cap::caps).length)
+            (heteroExtra w C seed caps mask)
+            (heteroExtra w C seed caps (mask ^^^ sub))
+            ((feasibleNetSubmasks w cap mask).map
+              (fun sub => heteroExtra w C seed caps (mask ^^^ sub)))
+            (List.mem_map.mpr ⟨sub,hmem,rfl⟩)
+          exact Nat.le_trans h (Nat.max_le.mpr ⟨hlo,hrec⟩)
+
+#print axioms mask_weights_split
+#print axioms stopMin_le_witness
+#print axioms net_packing_bin_lower
+#print axioms hetero_extra_le_packing
+end IslandLogistics
