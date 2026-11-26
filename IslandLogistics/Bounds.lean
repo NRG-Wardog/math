@@ -1779,11 +1779,15 @@ theorem path_assignment_valid (w : World) (s u : State) (flags : Nat → Bool)
     · have digit : admissibleDigit caps (concreteJob w s p) t = true := by
         have hn : t ≠ caps.length := by omega
         have hlt : t < caps.length := by omega
+        have hfit : w.weight p ≤ caps.getD t 0 := by
+          rw [cv t ht]
+          exact fit
+        have hfit' : w.weight p ≤ caps[t] := by simpa [hlt] using hfit
         rcases owner with own | own
-        · simp [admissibleDigit,concreteJob,hn,hlt,cv t ht,fit,own]
-        · simp [admissibleDigit,concreteJob,hn,hlt,cv t ht,fit,own]
-      change admissibleDigit caps (concreteJob w s p) t &&
-        admissibleDigits caps (selectedJobs w s ps) ds = true
+        · simp [admissibleDigit,concreteJob,hn,hlt,hfit,hfit',own]
+        · simp [admissibleDigit,concreteJob,hn,hlt,hfit,hfit',own]
+      change (admissibleDigit caps (concreteJob w s p) t &&
+        admissibleDigits caps (selectedJobs w s ps) ds) = true
       simp [digit,hf]
     · have hn : t ≠ w.trucks := by omega
       simp [omittedPenalty,flag,he,hn]
