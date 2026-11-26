@@ -7204,6 +7204,7 @@ theorem projection_actual_cost_bound (w : World) (cuts : List ProjectionCut)
   have hh := (concrete_visit_cut_profile_bound w c.side
     (trace_flux_path w c.side tr) done vl vp C cap seed).1
   unfold projectionProfile
+  dsimp only at hh ⊢
   omega
 
 theorem paired_road_projection_admissible (w : World)
