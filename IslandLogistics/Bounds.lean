@@ -314,3 +314,94 @@ theorem single_parcel_bound (w : World) (p : Nat) (hp : p < w.parcels)
 #print axioms project_step
 #print axioms single_parcel_bound
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+theorem sumN_congr (f g : Nat → Nat) (n : Nat)
+    (heq : ∀ q, q < n → f q = g q) : sumN f n = sumN g n := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    have e := heq n (by omega)
+    have pref := ih (fun q hq => heq q (by omega))
+    simp only [sumN]
+    omega
+
+theorem sumN_zero (n : Nat) : sumN (fun _ => 0) n = 0 := by
+  induction n with
+  | zero => rfl
+  | succ n ih => simp [sumN, ih]
+
+theorem sumN_one_change (f g : Nat → Nat) (p n : Nat)
+    (heq : ∀ q, q ≠ p → f q = g q)
+    (hp : f p ≤ 1 + g p) : sumN f n ≤ 1 + sumN g n := by
+  induction n with
+  | zero => simp [sumN]
+  | succ n ih =>
+    by_cases eq : n = p
+    · subst n
+      have pref := sumN_congr f g p (fun q hq => heq q (by omega))
+      simp only [sumN]
+      omega
+    · have e := heq n eq
+      simp only [sumN]
+      omega
+
+def handleOne (w : World) (s : State) (p : Nat) : Nat :=
+  match s.parcel p with
+  | .ground a => if a = w.goal p then 0 else 2
+  | .onTruck _ => 1
+
+def handling (w : World) (s : State) : Nat :=
+  sumN (handleOne w s) w.parcels
+
+theorem handling_step (w : World) {s u : State} {m h : Nat}
+    (st : Step w s u m h) : handling w s ≤ h + handling w u := by
+  cases st with
+  | drive t a b ht hr valid => simp [handling, handleOne]
+  | board t f a ht hf hr room valid => simp [handling, handleOne]
+  | disembark t f ht valid => simp [handling, handleOne]
+  | sail f b hr hne valid => simp [handling, handleOne]
+  | load p t a hp ht room valid =>
+    unfold handling
+    apply sumN_one_change (p := p)
+    · intro q neq
+      simp [handleOne, setAt, neq]
+    · simp [handleOne, setAt, hp]
+      split <;> omega
+  | unload p t a hp ht valid =>
+    unfold handling
+    apply sumN_one_change (p := p)
+    · intro q neq
+      simp [handleOne, setAt, neq]
+    · simp [handleOne, setAt, hp]
+
+theorem handling_goal (w : World) (s : State) (g : Goal w s) :
+    handling w s = 0 := by
+  unfold handling
+  have e := sumN_congr (handleOne w s) (fun _ => 0) w.parcels
+    (fun q hq => by simp [handleOne, g q hq])
+  rw [e, sumN_zero]
+
+theorem handling_path (w : World) {s u : State} {m h : Nat}
+    (path : Path (Step w) s u m h) (g : Goal w u) :
+    handling w s ≤ h := by
+  have e := handling_bound (handling w) (fun _ _ _ _ st => handling_step w st) path
+  rw [handling_goal w u g, Nat.add_zero] at e
+  exact e
+
+theorem single_parcel_plus_handling (w : World) (p : Nat) (hp : p < w.parcels)
+    (d : Projection → Nat)
+    (edgeCertificate : ∀ x y c, AStep w x y c → d x ≤ c + d y)
+    (goalCertificate : ∀ cfg, d ⟨.ground (w.goal p), cfg⟩ = 0)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h)
+    (goal : Goal w u) : d (project s p) + handling w s ≤ m + h := by
+  have hd := single_parcel_bound w p hp d edgeCertificate goalCertificate path goal
+  have hh := handling_path w path goal
+  omega
+
+#print axioms handling_step
+#print axioms handling_path
+#print axioms single_parcel_plus_handling
+end IslandLogistics
