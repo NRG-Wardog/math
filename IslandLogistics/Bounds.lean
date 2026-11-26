@@ -3955,3 +3955,133 @@ theorem direct_road_forest_admissible (w : World) (sys : RoadCutSystem w)
 #print axioms directMaskProfile_actual
 #print axioms direct_road_forest_admissible
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- The chain representation used by DirectCutAssignments.evaluate:
+-- one uniform profile multiplied by the number of contracted edges,
+-- followed by a subset minimum. Its proof uses actual endpoint masks.
+inductive CompressedCutForest where
+  | empty
+  | chain : (Nat → Bool) → List (Nat → Bool) → CompressedCutForest → CompressedCutForest
+  | join : CompressedCutForest → CompressedCutForest → CompressedCutForest
+
+def compressedRegion : CompressedCutForest → Nat → Bool
+  | .empty => fun _ => false
+  | .chain outer _ _ => outer
+  | .join l r => fun a => compressedRegion l a || compressedRegion r a
+
+def compressedCuts : CompressedCutForest → List (Nat → Bool)
+  | .empty => []
+  | .chain outer rest child => (outer :: rest) ++ compressedCuts child
+  | .join l r => compressedCuts l ++ compressedCuts r
+
+def compressedDP (row : (Nat → Bool) → Nat → Nat) : CompressedCutForest → CutDP
+  | .empty => .leaf
+  | .chain outer rest child =>
+    .relax (.repeat (rest.length+1) (row outer) (compressedDP row child))
+  | .join l r => .split (compressedDP row l) (compressedDP row r)
+
+def ValidCompressedForest (row : (Nat → Bool) → Nat → Nat) :
+    CompressedCutForest → Prop
+  | .empty => True
+  | .chain outer rest child =>
+    ValidCompressedForest row child ∧
+    (∀ side ∈ outer :: rest, ∀ a, side a = true → outer a = true) ∧
+    (∀ side ∈ outer :: rest, ∀ a, compressedRegion child a = true → side a = true) ∧
+    (∀ side ∈ outer :: rest, row side = row outer)
+  | .join l r =>
+    ValidCompressedForest row l ∧ ValidCompressedForest row r ∧
+    ∀ a, compressedRegion l a = true → compressedRegion r a = false
+
+def compressedActualCost (w : World) (u : State) (row : (Nat → Bool) → Nat → Nat)
+    (tree : CompressedCutForest) : Nat :=
+  ((compressedCuts tree).map (fun side => row side (finalMask w u side))).sum
+
+theorem min_times_length_le_sum (xs : List Nat) (z : Nat)
+    (lower : ∀ x ∈ xs, z ≤ x) : xs.length*z ≤ xs.sum := by
+  induction xs with
+  | nil => simp
+  | cons x xs ih =>
+    have hx := lower x (by simp)
+    have ht := ih (fun y hy => lower y (List.mem_cons_of_mem _ hy))
+    simp only [List.length_cons,List.sum_cons,Nat.add_mul,Nat.one_mul]
+    omega
+
+theorem choose_chain_mask (w : World) (u : State)
+    (row : (Nat → Bool) → Nat → Nat) (outer : Nat → Bool)
+    (rest : List (Nat → Bool))
+    (uniform : ∀ side ∈ outer :: rest, row side = row outer) :
+    ∃ side ∈ outer :: rest,
+      (rest.length+1) * row outer (finalMask w u side) ≤
+        (((outer :: rest).map (fun a => row a (finalMask w u a))).sum) := by
+  let vals := (outer :: rest).map (fun a => row a (finalMask w u a))
+  have nonempty : vals ≠ [] := by simp [vals]
+  have hm := exactCutMin_attained 0 vals nonempty
+  obtain ⟨side,hs,he⟩ := List.mem_map.mp hm
+  refine ⟨side,hs,?_⟩
+  have lower := min_times_length_le_sum vals (exactCutMin 0 vals)
+    (fun x hx => exactCutMin_le_member 0 vals x hx)
+  rw [← uniform side hs,he]
+  simpa [vals] using lower
+
+-- A single mask minimizing the common profile over the real chain
+-- contains all actual child endpoints and is contained in the allowed
+-- outer mask. Thus compression cannot overcharge that legal completion.
+theorem compressed_forest_actual_bound (w : World) (u : State)
+    (row : (Nat → Bool) → Nat → Nat) (tree : CompressedCutForest)
+    (valid : ValidCompressedForest row tree) (top mask : Nat)
+    (inside : maskWithin (finalMask w u (compressedRegion tree)) mask) :
+    evalCut top (compressedDP row tree) mask ≤ compressedActualCost w u row tree := by
+  induction tree generalizing mask with
+  | empty => simp [compressedDP,evalCut,compressedActualCost,compressedCuts]
+  | chain outer rest child ih =>
+    obtain ⟨vc,outerContains,childContained,uniform⟩ := valid
+    obtain ⟨side,hs,hrow⟩ := choose_chain_mask w u row outer rest uniform
+    let sub := finalMask w u side
+    have hsub : maskWithin sub mask :=
+      maskWithin_trans (finalMask_subset w u side outer (outerContains side hs)) inside
+    have hchild := ih vc sub
+      (finalMask_subset w u (compressedRegion child) side (childContained side hs))
+    have hmin := subsetMinValue_witness top
+      (evalCut top (.repeat (rest.length+1) (row outer) (compressedDP row child)))
+      mask sub (Nat.le_of_testBit hsub) (maskWithin_and hsub)
+    change subsetMinValue top
+      (evalCut top (.repeat (rest.length+1) (row outer) (compressedDP row child)))
+      mask ≤ _
+    apply Nat.le_trans hmin
+    change (rest.length+1)*row outer sub + evalCut top (compressedDP row child) sub ≤ _
+    unfold compressedActualCost at *
+    simp only [compressedCuts,List.map_append,natListSum_append]
+    change (rest.length+1)*row outer (finalMask w u side) + evalCut top (compressedDP row child) sub ≤ _
+    omega
+  | join l r il ir =>
+    let sub := finalMask w u (compressedRegion r)
+    have hright : maskWithin sub mask :=
+      maskWithin_trans (finalMask_join_right w u _ _) inside
+    have hleft : maskWithin (finalMask w u (compressedRegion l)) mask :=
+      maskWithin_trans (finalMask_join_left w u _ _) inside
+    have lmask := finalMask_remove_disjoint w u (compressedRegion l) (compressedRegion r) mask hleft valid.2.2
+    have hl := il valid.1 (mask ^^^ sub) lmask
+    have hr := ir valid.2.1 sub (maskWithin_refl _)
+    have hm := mergeValue_witness top (evalCut top (compressedDP row l))
+      (evalCut top (compressedDP row r)) mask sub (Nat.le_of_testBit hright) (maskWithin_and hright)
+    change mergeValue top (evalCut top (compressedDP row l)) (evalCut top (compressedDP row r)) mask ≤ _
+    apply Nat.le_trans hm
+    unfold compressedActualCost at *
+    simp only [compressedCuts,List.map_append,natListSum_append]
+    omega
+
+theorem compressed_full_mask_bound (w : World) (u : State)
+    (row : (Nat → Bool) → Nat → Nat) (tree : CompressedCutForest)
+    (valid : ValidCompressedForest row tree) (top : Nat) :
+    evalCut top (compressedDP row tree) (2^w.trucks-1) ≤
+      compressedActualCost w u row tree :=
+  compressed_forest_actual_bound w u row tree valid top _ (finalMask_full w u _)
+
+#print axioms min_times_length_le_sum
+#print axioms choose_chain_mask
+#print axioms compressed_forest_actual_bound
+#print axioms compressed_full_mask_bound
+end IslandLogistics
