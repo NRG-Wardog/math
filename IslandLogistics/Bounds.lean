@@ -6147,3 +6147,239 @@ theorem route_actual_trace_bound (w : World) (r : RouteData) (fmt : RouteFormat 
 #print axioms trace_route_execution
 #print axioms route_actual_trace_bound
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+def isGroundParcel (s : State) (p : Nat) : Bool :=
+  match s.parcel p with
+  | .ground _ => true
+  | .onTruck _ => false
+
+def routeInitialPick (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (t : Nat) : Nat :=
+  predMask w.parcels (fun p => traceSelector w tr t p && isGroundParcel s p)
+
+def routeInitialHeld (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (t : Nat) : Nat :=
+  predMask w.parcels (fun p => traceSelector w tr t p && !isGroundParcel s p)
+
+theorem trace_route_initial_ok (w : World) (r : RouteData)
+    (t : Nat) (ht : t < w.trucks) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h)
+    (sources : ∀ p a, s.parcel p = .ground a → r.source p = .ground a) :
+    RouteOK w r t tr (routeInitialPick w tr t) (routeInitialHeld w tr t) := by
+  constructor
+  · intro p hp
+    have hh : p < w.parcels ∧ traceSelector w tr t p = true ∧ isGroundParcel s p = true := by
+      simpa [routeInitialPick,predMask_testBit,Bool.and_assoc] using hp
+    obtain ⟨active,carrier,safe⟩ := trace_selector_owner w tr t ht p hh.2.1
+    cases he : s.parcel p with
+    | ground a =>
+      refine ⟨hh.1,a,he,sources p a he,?_,carrier,safe⟩
+      intro eq
+      exact active (by simpa [eq] using he)
+    | onTruck z => simp [isGroundParcel,he] at hh
+  · intro p hp
+    have hh : p < w.parcels ∧ traceSelector w tr t p = true ∧ isGroundParcel s p = false := by
+      simpa [routeInitialHeld,predMask_testBit,Bool.and_assoc] using hp
+    obtain ⟨active,carrier,safe⟩ := trace_selector_owner w tr t ht p hh.2.1
+    cases he : s.parcel p with
+    | ground a => simp [isGroundParcel,he] at hh
+    | onTruck z =>
+      have eq := traceCarrier_held w tr p z he
+      rw [carrier] at eq
+      have eq' := Option.some.inj eq
+      subst z
+      exact ⟨hh.1,he,safe⟩
+
+-- The actual path determines the retained parcel masks of each truck,
+-- not an arbitrary hypothesized feasible route allocation.
+theorem trace_route_row_bound (w : World) (r : RouteData) (fmt : RouteFormat w r)
+    (t : Nat) (ht : t < w.trucks) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (done : Goal w u)
+    (sources : ∀ p a, s.parcel p = .ground a → r.source p = .ground a)
+    (top : Nat) :
+    routeRecurrence r (w.capacity t) top (2*r.parcels) (truckVertex s t)
+      (routeInitialPick w tr t) (routeInitialHeld w tr t) ≤ traceRouteCost w r t tr :=
+  route_actual_trace_bound w r fmt t tr done _ _
+    (trace_route_initial_ok w r t ht tr sources) top
+
+-- Costs assigned to the three disjoint categories of movement.
+-- Choosing service/sailing charges zero gives the road-only and
+-- zero-sailing route metrics, respectively.
+structure RouteTariff where
+  drive : Nat
+  service : Nat
+  sail : Nat
+  perSail : Nat → Nat
+
+structure RouteMetricCertificate (w : World) (r : RouteData) (price : RouteTariff) : Prop where
+  drive : ∀ a b, w.road a b → r.dist (.ground a) (.ground b) ≤ price.drive
+  board : ∀ f a, w.route f a → r.dist (.ground a) (.aboard f a) ≤ price.service
+  disembark : ∀ f a, w.route f a → r.dist (.aboard f a) (.ground a) ≤ price.service
+  sail : ∀ f a b, w.route f a → w.route f b →
+    r.dist (.aboard f a) (.aboard f b) ≤ price.perSail f
+  slots : ∀ f, f < w.ferries → w.slots f * price.perSail f ≤ price.sail
+
+def tariffCharge (price : RouteTariff) : ActionLabel → Nat
+  | .drive _ _ _ => price.drive
+  | .board _ _ _ | .disembark _ _ => price.service
+  | .sail _ _ => price.sail
+  | .load _ _ _ | .unload _ _ _ => 0
+
+def truckMetricSum (w : World) (r : RouteData) (s u : State) : Nat :=
+  sumN (fun t => r.dist (truckVertex s t) (truckVertex u t)) w.trucks
+
+theorem truck_metric_sum_same (w : World) (r : RouteData) (s u : State)
+    (same : ∀ t, t < w.trucks → truckVertex s t = truckVertex u t) :
+    truckMetricSum w r s u = 0 := by
+  unfold truckMetricSum
+  rw [sumN_congr _ (fun _ => 0) _ (by
+    intro t ht
+    rw [same t ht]
+    exact r.zero _),sumN_zero]
+
+theorem route_step_metric_budget (w : World) (r : RouteData)
+    (price : RouteTariff) (cert : RouteMetricCertificate w r price)
+    {s u : State} {act : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u act m h)
+    (vf : ValidFerries w s) (vo : ValidFerryOccupancy w s) :
+    truckMetricSum w r s u ≤ tariffCharge price act := by
+  cases st with
+  | drive t a b ht hr valid =>
+    unfold truckMetricSum
+    rw [sumN_single _ _ t valid.1 (by
+      intro q hq ne
+      simp [truckVertex,setAt,ne]
+      exact r.zero _)]
+    simpa [truckVertex,ht,setAt,tariffCharge] using cert.drive a b hr
+  | board t f a ht hf hr room valid =>
+    unfold truckMetricSum
+    rw [sumN_single _ _ t valid.1 (by
+      intro q hq ne
+      simp [truckVertex,setAt,ne]
+      exact r.zero _)]
+    simpa [truckVertex,ht,hf,setAt,tariffCharge] using cert.board f a hr
+  | disembark t f ht valid =>
+    unfold truckMetricSum
+    rw [sumN_single _ _ t valid.1 (by
+      intro q hq ne
+      simp [truckVertex,setAt,ne]
+      exact r.zero _)]
+    simpa [truckVertex,ht,setAt,tariffCharge] using
+      cert.disembark f (s.ferry f) (vf f valid.2)
+  | sail f b hr hne valid =>
+    unfold truckMetricSum
+    have h : sumN (fun t => r.dist (truckVertex s t)
+        (truckVertex {s with ferry := setAt s.ferry f b} t)) w.trucks ≤
+        sumN (fun t => (if s.truck t = .onFerry f then 1 else 0) * price.perSail f) w.trucks := by
+      apply sumN_mono
+      intro t ht
+      cases he : s.truck t with
+      | land a => simp [truckVertex,he,r.zero]
+      | onFerry g =>
+        by_cases eq : g = f
+        · subst g
+          simpa [truckVertex,he,setAt] using cert.sail f (s.ferry f) b (vf f valid.1) hr
+        · simp [truckVertex,he,setAt,eq,r.zero]
+    rw [sumN_mul_right] at h
+    have hh := Nat.mul_le_mul_right (price.perSail f) (vo f valid.1)
+    change _ ≤ price.sail
+    exact Nat.le_trans h (Nat.le_trans hh (cert.slots f valid.1))
+  | load p t a hp ht room valid =>
+    rw [truck_metric_sum_same w r s _ (by intro q hq; cases he : s.truck q <;> simp [truckVertex,he])]
+    exact Nat.zero_le _
+  | unload p t a hp ht valid =>
+    rw [truck_metric_sum_same w r s _ (by intro q hq; cases he : s.truck q <;> simp [truckVertex,he])]
+    exact Nat.zero_le _
+
+-- The three counts are tied to the identical concrete trace whose
+-- truck movement cost was used in the route DP proof.
+def driveCount : ActionLabel → Nat
+  | .drive _ _ _ => 1
+  | _ => 0
+
+def serviceCount : ActionLabel → Nat
+  | .board _ _ _ | .disembark _ _ => 1
+  | _ => 0
+
+def sailCount : ActionLabel → Nat
+  | .sail _ _ => 1
+  | _ => 0
+
+inductive TraceCounts (w : World) :
+    {s u : State} → {m h : Nat} → LegalTrace w s u m h → Nat → Nat → Nat → Prop where
+  | nil (s : State) : TraceCounts w (LegalTrace.nil s) 0 0 0
+  | cons {s v u : State} {a b m h : Nat} {st : Step w s v a b}
+      {tail : LegalTrace w v u m h} {act : ActionLabel} {d x f : Nat} :
+      LabelStep w s v act a b → TraceCounts w tail d x f →
+      TraceCounts w (LegalTrace.cons st tail) (driveCount act+d) (serviceCount act+x) (sailCount act+f)
+
+theorem trace_counts_exist (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) : ∃ d x f, TraceCounts w tr d x f := by
+  induction tr with
+  | nil s => exact ⟨0,0,0,TraceCounts.nil s⟩
+  | cons st tail ih =>
+    obtain ⟨act,step⟩ := label_step_complete w st
+    obtain ⟨d,x,f,counts⟩ := ih
+    exact ⟨_,_,_,TraceCounts.cons step counts⟩
+
+theorem action_movement_count (w : World) {s u : State} {act : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u act m h) : m = driveCount act + serviceCount act + 3*sailCount act := by
+  cases st <;> rfl
+
+theorem trace_count_movement (w : World) {s u : State} {m h : Nat}
+    {tr : LegalTrace w s u m h} {d x f : Nat}
+    (counts : TraceCounts w tr d x f) : m = d+x+3*f := by
+  induction counts with
+  | nil s => rfl
+  | cons st tail ih =>
+    have hm := action_movement_count w st
+    omega
+
+theorem tariff_count_charge (price : RouteTariff) (act : ActionLabel) :
+    tariffCharge price act = price.drive*driveCount act +
+      price.service*serviceCount act + price.sail*sailCount act := by
+  cases act <;> simp [tariffCharge,driveCount,serviceCount,sailCount]
+
+theorem trace_route_metric_sum (w : World) (r : RouteData)
+    (price : RouteTariff) (cert : RouteMetricCertificate w r price)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {d x f : Nat}
+    (counts : TraceCounts w tr d x f)
+    (vf : ValidFerries w s) (vo : ValidFerryOccupancy w s) :
+    sumN (fun t => traceRouteCost w r t tr) w.trucks ≤
+      price.drive*d + price.service*x + price.sail*f := by
+  induction counts with
+  | nil s => simp [traceRouteCost,sumN_zero]
+  | @cons s v u a b m h st tail act d x f lab tailCounts ih =>
+    have hb := route_step_metric_budget w r price cert lab vf vo
+    have ht := ih (step_valid_ferries w st vf) (step_valid_occupancy w st vo)
+    simp only [traceRouteCost,sumN_add,truckMetricSum] at *
+    rw [tariff_count_charge] at hb
+    simp only [Nat.mul_add]
+    omega
+
+theorem all_assigned_route_rows_bound (w : World) (r : RouteData) (fmt : RouteFormat w r)
+    (price : RouteTariff) (cert : RouteMetricCertificate w r price)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {d x f : Nat}
+    (counts : TraceCounts w tr d x f) (done : Goal w u)
+    (sources : ∀ p a, s.parcel p = .ground a → r.source p = .ground a)
+    (vf : ValidFerries w s) (vo : ValidFerryOccupancy w s)
+    (top : Nat) :
+    sumN (fun t => routeRecurrence r (w.capacity t) top (2*r.parcels) (truckVertex s t)
+      (routeInitialPick w tr t) (routeInitialHeld w tr t)) w.trucks ≤
+      price.drive*d + price.service*x + price.sail*f := by
+  have hr := sumN_mono
+    (fun t => routeRecurrence r (w.capacity t) top (2*r.parcels) (truckVertex s t)
+      (routeInitialPick w tr t) (routeInitialHeld w tr t))
+    (fun t => traceRouteCost w r t tr) w.trucks
+    (fun t ht => trace_route_row_bound w r fmt t ht tr done sources top)
+  exact Nat.le_trans hr (trace_route_metric_sum w r price cert counts vf vo)
+
+#print axioms trace_route_initial_ok
+#print axioms trace_route_row_bound
+#print axioms route_step_metric_budget
+#print axioms trace_route_metric_sum
+#print axioms all_assigned_route_rows_bound
+end IslandLogistics
