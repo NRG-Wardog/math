@@ -3828,3 +3828,129 @@ theorem forest_dp_real_terminal_bound (w : World) (u : State)
 #print axioms forest_actual_witness
 #print axioms forest_dp_real_terminal_bound
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+def digitSelector (ids ds : List Nat) (t p : Nat) : Bool :=
+  (ids.zip ds).any (fun q => (q.1 == p) && (q.2 == t))
+
+theorem zip_map_self {α β : Type} (xs : List α) (f : α → β) :
+    xs.zip (xs.map f) = xs.map (fun x => (x,f x)) := by
+  induction xs with
+  | nil => rfl
+  | cons x xs ih => simp [ih]
+
+theorem digitSelector_trace_owner (w : World)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (t : Nat) (ht : t < w.trucks) (p : Nat)
+    (sel : digitSelector (activeParcels w s) (traceDigits w tr) t p = true) :
+    s.parcel p ≠ .ground (w.goal p) ∧
+      traceCarrier w tr p = some t ∧ traceSafe w tr p := by
+  unfold digitSelector traceDigits at sel
+  rw [zip_map_self] at sel
+  simp only [List.any_eq_true,List.mem_map] at sel
+  obtain ⟨q,⟨x,hx,rfl⟩,he⟩ := sel
+  have hh : x = p ∧ traceDigit w tr x = t := by simpa using he
+  obtain ⟨rfl,hd⟩ := hh
+  have ha : p < w.parcels ∧ s.parcel p ≠ .ground (w.goal p) := by
+    simpa [activeParcels] using hx
+  apply trace_selector_owner w tr t ht p
+  simp [traceSelector,ha.2,hd]
+
+def maskSide (mask t : Nat) : Nat := if mask.testBit t then 1 else 0
+
+theorem maskSide_actual (w : World) (s : State) (side : Nat → Bool) (t : Nat)
+    (ht : t < w.trucks) :
+    maskSide (finalMask w s side) t = truckSide side s t := by
+  simp [maskSide,finalMask,predMask_testBit,ht,truckSide]
+
+noncomputable def directMaskProfile (w : World) (side : Nat → Bool)
+    (s : State) (C : Nat) (sel : Nat → Nat → Bool) (seed : BinState)
+    (mask : Nat) : Nat :=
+  let delta : Int := (sumN (maskSide mask) w.trucks : Int) - cutStockCount w side s
+  let x := sumN (fun t => max (assignedVisitInward w side s t (sel t) seed)
+    (assignedVisitInward w (fun v => !side v) s t (sel t) seed +
+      maskSide mask t - truckSide side s t)) w.trucks
+  let I := visitInward w side s C seed
+  let O := visitInward w (fun v => !side v) s C seed
+  (max (2*(x : Int)-delta) (max (2*(I : Int)-delta) (2*(O : Int)+delta))).toNat
+
+theorem directMaskProfile_actual (w : World) (side : Nat → Bool)
+    (s u : State) (C : Nat) (sel : Nat → Nat → Bool) (seed : BinState) :
+    directMaskProfile w side s C sel seed (finalMask w u side) =
+      (directPhysicalProfile w side s u C sel seed).toNat := by
+  have hstock : sumN (maskSide (finalMask w u side)) w.trucks = cutStockCount w side u := by
+    unfold cutStockCount
+    apply sumN_congr
+    intro t ht
+    exact maskSide_actual w u side t ht
+  have hx : sumN (fun t => max (assignedVisitInward w side s t (sel t) seed)
+      (assignedVisitInward w (fun v => !side v) s t (sel t) seed +
+        maskSide (finalMask w u side) t - truckSide side s t)) w.trucks =
+      sumN (fun t => requiredInForFinal w side s u t (sel t) seed) w.trucks := by
+    apply sumN_congr
+    intro t ht
+    simp [requiredInForFinal,maskSide_actual w u side t ht]
+  unfold directMaskProfile directPhysicalProfile
+  dsimp only
+  rw [hstock,hx]
+
+noncomputable def directRoadForestBound (w : World) (s : State)
+    (caps : List Nat) (C : Nat) (seed : BinState) (forest : CutForest)
+    (top baseMove : Nat) : Nat :=
+  exactCutMin top ((assignmentColumns caps (selectedJobs w s (activeParcels w s))).map
+    (fun ds => omittedPenalty caps.length ds + max baseMove
+      (evalCut top (forestDP (fun side mask =>
+        directMaskProfile w side s C (digitSelector (activeParcels w s) ds) seed mask) forest)
+        (2^w.trucks-1))))
+
+-- The full uncompressed, unit-cost true-road coupled cut forest:
+-- assignment enumeration, transfer penalty, per-truck and aggregate
+-- capacity, visit requirements, terminal mask DP and movement budget
+-- are all derived from ONE actual legal completion.
+theorem direct_road_forest_admissible (w : World) (sys : RoadCutSystem w)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (vf : ValidParcelFit w s) (vfer : ValidFerries w s) (vt : ValidTruckCarriers w s)
+    (caps : List Nat) (cl : caps.length = w.trucks)
+    (cv : ∀ t, t < w.trucks → caps.getD t 0 = w.capacity t)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (seed : BinState) (forest : CutForest) (valid : ValidCutForest forest)
+    (cuts : forestCuts forest = sys.cuts) (top baseMove : Nat) (baseBound : baseMove ≤ m) :
+    handling w s + directRoadForestBound w s caps C seed forest top baseMove ≤ m+h := by
+  obtain ⟨tr⟩ := trace_from_path w path
+  let ds := traceDigits w tr
+  let sel := digitSelector (activeParcels w s) ds
+  let row := fun side mask => directMaskProfile w side s C sel seed mask
+  obtain ⟨mem,hpen⟩ := trace_assignment_column w tr done vp vf caps cl cv
+  have forestBound := forest_dp_real_terminal_bound w u row forest valid top
+  have hcuts := trace_road_cut_budget w sys tr vfer vt
+  have hactual : actualForestCost w u row forest ≤ m := by
+    unfold actualForestCost
+    rw [cuts]
+    apply Nat.le_trans _ hcuts
+    apply sum_map_le
+    intro side hs
+    have hprofile := concrete_direct_profile_bound w side tr done vl vp C cap sel
+      (fun t ht p hp own => digitSelector_trace_owner w tr t ht p own) seed
+    change directMaskProfile w side s C sel seed (finalMask w u side) ≤
+      traceIn w side tr + traceOut w side tr
+    rw [directMaskProfile_actual]
+    omega
+  have hdp : evalCut top (forestDP row forest) (2^w.trucks-1) ≤ m :=
+    Nat.le_trans forestBound hactual
+  have hm : directRoadForestBound w s caps C seed forest top baseMove ≤
+      omittedPenalty caps.length ds + max baseMove (evalCut top (forestDP row forest) (2^w.trucks-1)) := by
+    unfold directRoadForestBound
+    apply exactCutMin_le_member
+    exact List.mem_map.mpr ⟨ds,mem,rfl⟩
+  have hmax : max baseMove (evalCut top (forestDP row forest) (2^w.trucks-1)) ≤ m :=
+    Nat.max_le.mpr ⟨baseBound,hdp⟩
+  change handling w s + omittedPenalty caps.length ds ≤ h at hpen
+  omega
+
+#print axioms digitSelector_trace_owner
+#print axioms directMaskProfile_actual
+#print axioms direct_road_forest_admissible
+end IslandLogistics
