@@ -2469,7 +2469,8 @@ theorem groupWeights_fit (w : World) (s : State) (C : Nat)
     · apply ih (fun p => sel p && !(key p == t))
         (fun t ht => valid t (List.mem_cons_of_mem _ ht)) ?_ g hg
       intro p hp h
-      have hs : sel p = true := (Bool.and_eq_true.mp h).1
+      have hs : sel p = true := by
+        cases hs : sel p <;> simp_all
       exact owner p hp hs
 
 -- For an actual legal primitive, all selected parcels which cross a
@@ -2481,7 +2482,7 @@ theorem legal_step_crossing_groups (w : World) (side : Nat → Bool)
     (sel : Nat → Bool)
     (moves : ∀ p, p < w.parcels → sel p = true →
       side (physicalParcel s p) = false ∧ side (physicalParcel u p) = true) :
-    ∃ groups,
+    ∃ groups : List (List Nat),
       List.Perm (selectedWeights w sel) groups.flatten ∧
       (∀ g ∈ groups, g.sum ≤ C) ∧
       groups.length = (enteringTrucks w side s u).length := by
