@@ -4469,3 +4469,365 @@ theorem weighted_transport_admissible (w : World) (mass : Nat → Nat) (limit sc
 #print axioms weighted_step_budget
 #print axioms weighted_transport_admissible
 end IslandLogistics
+
+
+namespace IslandLogistics
+/- Action labels for the actual six transition constructors. -/
+inductive ActionLabel where
+  | drive : Nat → Nat → Nat → ActionLabel
+  | board : Nat → Nat → Nat → ActionLabel
+  | disembark : Nat → Nat → ActionLabel
+  | sail : Nat → Nat → ActionLabel
+  | load : Nat → Nat → Nat → ActionLabel
+  | unload : Nat → Nat → Nat → ActionLabel
+
+inductive LabelStep (w : World) : State → State → ActionLabel → Nat → Nat → Prop where
+  | drive (s : State) (t a b : Nat)
+      (ht : s.truck t = .land a) (hr : w.road a b)
+      (valid : t < w.trucks ∧ a < w.locations ∧ b < w.locations) :
+      LabelStep w s {s with truck := setAt s.truck t (.land b)} (.drive t a b) 1 0
+  | board (s : State) (t f a : Nat)
+      (ht : s.truck t = .land a) (hf : s.ferry f = a) (hr : w.route f a)
+      (room : occupancy w s f < w.slots f)
+      (valid : t < w.trucks ∧ f < w.ferries ∧ a < w.locations) :
+      LabelStep w s {s with truck := setAt s.truck t (.onFerry f)} (.board t f a) 1 0
+  | disembark (s : State) (t f : Nat)
+      (ht : s.truck t = .onFerry f) (valid : t < w.trucks ∧ f < w.ferries) :
+      LabelStep w s {s with truck := setAt s.truck t (.land (s.ferry f))} (.disembark t f) 1 0
+  | sail (s : State) (f b : Nat)
+      (hr : w.route f b) (hne : s.ferry f ≠ b)
+      (valid : f < w.ferries ∧ b < w.locations) :
+      LabelStep w s {s with ferry := setAt s.ferry f b} (.sail f b) 3 0
+  | load (s : State) (p t a : Nat)
+      (hp : s.parcel p = .ground a) (ht : s.truck t = .land a)
+      (room : load w s t + w.weight p ≤ w.capacity t)
+      (valid : p < w.parcels ∧ t < w.trucks ∧ a < w.locations) :
+      LabelStep w s {s with parcel := setAt s.parcel p (.onTruck t)} (.load p t a) 0 1
+  | unload (s : State) (p t a : Nat)
+      (hp : s.parcel p = .onTruck t) (ht : s.truck t = .land a)
+      (valid : p < w.parcels ∧ t < w.trucks ∧ a < w.locations) :
+      LabelStep w s {s with parcel := setAt s.parcel p (.ground a)} (.unload p t a) 0 1
+
+theorem label_step_sound (w : World) {s u : State} {a : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u a m h) : Step w s u m h := by
+  cases st with
+  | drive t a b ht hr v => exact Step.drive s t a b ht hr v
+  | board t f a ht hf hr room v => exact Step.board s t f a ht hf hr room v
+  | disembark t f ht v => exact Step.disembark s t f ht v
+  | sail f b hr hne v => exact Step.sail s f b hr hne v
+  | load p t a hp ht room v => exact Step.load s p t a hp ht room v
+  | unload p t a hp ht v => exact Step.unload s p t a hp ht v
+
+theorem label_step_complete (w : World) {s u : State} {m h : Nat}
+    (st : Step w s u m h) : ∃ a, LabelStep w s u a m h := by
+  cases st with
+  | drive t a b ht hr v => exact ⟨_,LabelStep.drive s t a b ht hr v⟩
+  | board t f a ht hf hr room v => exact ⟨_,LabelStep.board s t f a ht hf hr room v⟩
+  | disembark t f ht v => exact ⟨_,LabelStep.disembark s t f ht v⟩
+  | sail f b hr hne v => exact ⟨_,LabelStep.sail s f b hr hne v⟩
+  | load p t a hp ht room v => exact ⟨_,LabelStep.load s p t a hp ht room v⟩
+  | unload p t a hp ht v => exact ⟨_,LabelStep.unload s p t a hp ht v⟩
+
+-- These are exactly the static contraction conditions in Pattern.__init__.
+-- No assertion about a table label or shortest path appears here.
+structure GeoSpec (w : World) where
+  loc : Nat → Nat
+  keepF : Nat → Bool
+  keepP : Nat → Bool
+  extraP : Nat → Bool
+  chargeRoad : Nat → Nat → Bool
+  locBound : ∀ a, a < w.locations → loc a < w.locations
+  freeRoad : ∀ a b, w.road a b → chargeRoad a b = false → loc a = loc b
+  freeFerry : ∀ f a b, 0 < w.slots f → keepF f = false →
+    w.route f a → w.route f b → loc a = loc b
+
+def GeoSpec.world (r : GeoSpec w) : World where
+  locations := w.locations
+  trucks := w.trucks
+  ferries := w.ferries
+  parcels := w.parcels
+  road a b := ∃ x y, w.road x y ∧ r.loc x = a ∧ r.loc y = b
+  route f a := r.keepF f = true ∧ ∃ x, w.route f x ∧ r.loc x = a
+  capacity := w.capacity
+  slots := w.slots
+  weight := w.weight
+  goal p := r.loc (w.goal p)
+
+def geoTruck (r : GeoSpec w) (s : State) : TruckPosition → TruckPosition
+  | .land a => .land (r.loc a)
+  | .onFerry f => if r.keepF f then .onFerry f else .land (r.loc (s.ferry f))
+
+def geoParcel (r : GeoSpec w) (p : Nat) (pos : ParcelPosition) : ParcelPosition :=
+  if r.keepP p then
+    match pos with
+    | .ground a => .ground (r.loc a)
+    | .onTruck t => .onTruck t
+  else .ground (r.loc (w.goal p))
+
+def geoState (r : GeoSpec w) (s : State) : State :=
+  ⟨fun t => if t < w.trucks then geoTruck r s (s.truck t) else .land 0,
+   fun f => if f < w.ferries ∧ r.keepF f = true then r.loc (s.ferry f) else 0,
+   fun p => geoParcel r p (s.parcel p)⟩
+
+theorem geo_truck_at (r : GeoSpec w) (s : State) (t : Nat) (ht : t < w.trucks) :
+    (geoState r s).truck t = geoTruck r s (s.truck t) := by simp [geoState,ht]
+
+theorem geo_ferry_at (r : GeoSpec w) (s : State) (f : Nat)
+    (hf : f < w.ferries) (hk : r.keepF f = true) :
+    (geoState r s).ferry f = r.loc (s.ferry f) := by simp [geoState,hf,hk]
+
+theorem geo_parcel_at (r : GeoSpec w) (s : State) (p : Nat) :
+    (geoState r s).parcel p = geoParcel r p (s.parcel p) := rfl
+
+theorem setAt_current {α : Type} (f : Nat → α) (i : Nat) : setAt f i (f i) = f := by
+  funext j
+  by_cases he : j = i
+  · subst j; simp [setAt]
+  · simp [setAt,he]
+
+theorem geo_truck_update (r : GeoSpec w) (s : State) (t : Nat) (v : TruckPosition)
+    (ht : t < w.trucks) :
+    geoState r {s with truck := setAt s.truck t v} =
+      {geoState r s with truck := setAt (geoState r s).truck t (geoTruck r s v)} := by
+  have he : (geoState r {s with truck := setAt s.truck t v}).truck =
+      setAt (geoState r s).truck t (geoTruck r s v) := by
+    funext q
+    by_cases h : q = t
+    · subst q; cases v <;> simp [geoState,geoTruck,setAt,ht]
+    · cases hq : s.truck q <;> simp [geoState,geoTruck,setAt,h,hq]
+  simp only [geoState] at he ⊢
+  rw [he]
+
+theorem geo_parcel_update (r : GeoSpec w) (s : State) (p : Nat) (v : ParcelPosition) :
+    geoState r {s with parcel := setAt s.parcel p v} =
+      {geoState r s with parcel := setAt (geoState r s).parcel p (geoParcel r p v)} := by
+  have he : (geoState r {s with parcel := setAt s.parcel p v}).parcel =
+      setAt (geoState r s).parcel p (geoParcel r p v) := by
+    funext q
+    by_cases h : q = p
+    · subst q; simp [geoState,setAt]
+    · simp [geoState,setAt,h]
+  simp only [geoState] at he ⊢
+  rw [he]
+
+theorem geo_ferry_update_keep (r : GeoSpec w) (s : State) (f b : Nat)
+    (hf : f < w.ferries) (hk : r.keepF f = true) :
+    geoState r {s with ferry := setAt s.ferry f b} =
+      {geoState r s with ferry := setAt (geoState r s).ferry f (r.loc b)} := by
+  have ht : (geoState r {s with ferry := setAt s.ferry f b}).truck = (geoState r s).truck := by
+    funext t
+    by_cases hv : t < w.trucks
+    · cases he : s.truck t with
+      | land x => simp [geoState,geoTruck,hv,he]
+      | onFerry g =>
+        by_cases eg : g = f
+        · subst g; simp [geoState,geoTruck,hv,he,hk]
+        · simp [geoState,geoTruck,hv,he,setAt,eg]
+    · simp [geoState,hv]
+  have hfe : (geoState r {s with ferry := setAt s.ferry f b}).ferry =
+      setAt (geoState r s).ferry f (r.loc b) := by
+    funext q
+    by_cases h : q = f
+    · subst q; simp [geoState,setAt,hf,hk]
+    · simp [geoState,setAt,h]
+  simp only [geoState] at ht hfe ⊢
+  rw [ht,hfe]
+
+theorem geo_ferry_update_drop (r : GeoSpec w) (s : State) (f b : Nat)
+    (hk : r.keepF f = false) (hr : w.route f b)
+    (vf : ValidFerries w s) (vt : ValidTruckCarriers w s) :
+    geoState r {s with ferry := setAt s.ferry f b} = geoState r s := by
+  have ht : (geoState r {s with ferry := setAt s.ferry f b}).truck = (geoState r s).truck := by
+    funext t
+    by_cases hv : t < w.trucks
+    · cases he : s.truck t with
+      | land x => simp [geoState,geoTruck,hv,he]
+      | onFerry g =>
+        by_cases eg : g = f
+        · subst g
+          have h := vt t hv f he
+          have locEq := r.freeFerry f (s.ferry f) b h.2 hk (vf f h.1) hr
+          simp [geoState,geoTruck,hv,he,setAt,hk,locEq]
+        · simp [geoState,geoTruck,hv,he,setAt,eg]
+    · simp [geoState,hv]
+  have hfe : (geoState r {s with ferry := setAt s.ferry f b}).ferry =
+      (geoState r s).ferry := by
+    funext q
+    by_cases h : q = f
+    · subst q; simp [geoState,setAt,hk]
+    · simp [geoState,setAt,h]
+  simp only [geoState] at ht hfe ⊢
+  rw [ht,hfe]
+
+theorem geo_load_le (r : GeoSpec w) (s : State) (t : Nat) :
+    load r.world (geoState r s) t ≤ load w s t := by
+  unfold load
+  apply sumN_mono
+  intro p hp
+  change (if geoParcel r p (s.parcel p) = .onTruck t then w.weight p else 0) ≤
+    (if s.parcel p = .onTruck t then w.weight p else 0)
+  cases hk : r.keepP p <;> cases he : s.parcel p <;> simp [geoParcel,hk,he]
+
+theorem geo_occ_kept (r : GeoSpec w) (s : State) (f : Nat)
+    (hk : r.keepF f = true) :
+    occupancy r.world (geoState r s) f = occupancy w s f := by
+  unfold occupancy
+  apply sumN_congr
+  intro t ht
+  rw [geo_truck_at r s t ht]
+  cases he : s.truck t with
+  | land x => simp [geoTruck]
+  | onFerry g =>
+    by_cases eg : g = f
+    · subst g; simp [geoTruck,hk]
+    · cases hg : r.keepF g <;> simp [geoTruck,hg,eg]
+
+theorem geo_occ_dropped (r : GeoSpec w) (s : State) (f : Nat)
+    (hk : r.keepF f = false) :
+    occupancy r.world (geoState r s) f = 0 := by
+  unfold occupancy
+  have he := sumN_congr
+    (fun t => if (geoState r s).truck t = .onFerry f then 1 else 0)
+    (fun _ => 0) w.trucks (by
+      intro t ht
+      rw [geo_truck_at r s t ht]
+      cases he : s.truck t with
+      | land x => simp [geoTruck]
+      | onFerry g =>
+        by_cases eq : g = f
+        · subst g; simp [geoTruck,hk]
+        · cases hg : r.keepF g <;> simp [geoTruck,hg,eq])
+  rw [he,sumN_zero]
+
+theorem geo_valid_load (r : GeoSpec w) (s : State) (vl : ValidTruckLoad w s) :
+    ValidTruckLoad r.world (geoState r s) := by
+  intro t ht
+  exact Nat.le_trans (geo_load_le r s t) (vl t ht)
+
+theorem geo_valid_occupancy (r : GeoSpec w) (s : State) (vo : ValidFerryOccupancy w s) :
+    ValidFerryOccupancy r.world (geoState r s) := by
+  intro f hf
+  cases hk : r.keepF f
+  · rw [geo_occ_dropped r s f hk]; exact Nat.zero_le _
+  · rw [geo_occ_kept r s f hk]; exact vo f hf
+
+theorem geo_goal (r : GeoSpec w) (s : State) (done : Goal w s) :
+    Goal r.world (geoState r s) := by
+  intro p hp
+  change geoParcel r p (s.parcel p) = .ground (r.loc (w.goal p))
+  rw [done p hp]
+  cases hk : r.keepP p <;> simp [geoParcel,hk]
+
+def mapLabel (r : GeoSpec w) : ActionLabel → ActionLabel
+  | .drive t a b => .drive t (r.loc a) (r.loc b)
+  | .board t f a => .board t f (r.loc a)
+  | .disembark t f => .disembark t f
+  | .sail f b => .sail f (r.loc b)
+  | .load p t a => .load p t (r.loc a)
+  | .unload p t a => .unload p t (r.loc a)
+
+def geoEnabled (r : GeoSpec w) : ActionLabel → Prop
+  | .drive _ a b => r.loc a ≠ r.loc b ∧ r.chargeRoad a b = true
+  | .board _ f _ | .disembark _ f | .sail f _ => r.keepF f = true
+  | .load p _ _ | .unload p _ _ => r.keepP p = true
+
+theorem geo_project_label (r : GeoSpec w) {s u : State}
+    {a : ActionLabel} {m h : Nat} (st : LabelStep w s u a m h)
+    (vf : ValidFerries w s) (vt : ValidTruckCarriers w s) :
+    geoState r s = geoState r u ∨
+      (geoEnabled r a ∧ LabelStep r.world (geoState r s) (geoState r u) (mapLabel r a) m h) := by
+  cases st with
+  | drive t a b ht hr v =>
+    rw [geo_truck_update r s t (.land b) v.1]
+    have hs : (geoState r s).truck t = .land (r.loc a) := by
+      rw [geo_truck_at r s t v.1,ht]; rfl
+    by_cases he : r.loc a = r.loc b
+    · left
+      have hh : geoTruck r s (.land b) = (geoState r s).truck t := by simp [geoTruck,hs,he]
+      rw [hh,setAt_current]
+    · right
+      have hc : r.chargeRoad a b = true := by
+        cases hb : r.chargeRoad a b
+        · exact False.elim (he (r.freeRoad a b hr hb))
+        · rfl
+      refine ⟨⟨he,hc⟩,?_⟩
+      exact LabelStep.drive (geoState r s) t (r.loc a) (r.loc b) hs
+        ⟨a,b,hr,rfl,rfl⟩ ⟨v.1,r.locBound a v.2.1,r.locBound b v.2.2⟩
+  | board t f a ht hf hr room v =>
+    rw [geo_truck_update r s t (.onFerry f) v.1]
+    have hs : (geoState r s).truck t = .land (r.loc a) := by
+      rw [geo_truck_at r s t v.1,ht]; rfl
+    cases hk : r.keepF f
+    · left
+      have hh : geoTruck r s (.onFerry f) = (geoState r s).truck t := by simp [geoTruck,hk,hf,hs]
+      rw [hh,setAt_current]
+    · right
+      refine ⟨hk,?_⟩
+      simpa [geoTruck,hk,mapLabel] using
+        (LabelStep.board (w := r.world) (geoState r s) t f (r.loc a) hs
+          (by rw [geo_ferry_at r s f v.2.1 hk,hf])
+          ⟨hk,a,hr,rfl⟩ (by rw [geo_occ_kept r s f hk]; exact room)
+          ⟨v.1,v.2.1,r.locBound a v.2.2⟩)
+  | disembark t f ht v =>
+    rw [geo_truck_update r s t (.land (s.ferry f)) v.1]
+    cases hk : r.keepF f
+    · left
+      have hh : geoTruck r s (.land (s.ferry f)) = (geoState r s).truck t := by
+        rw [geo_truck_at r s t v.1,ht]; simp [geoTruck,hk]
+      rw [hh,setAt_current]
+    · right
+      refine ⟨hk,?_⟩
+      have hs : (geoState r s).truck t = .onFerry f := by
+        rw [geo_truck_at r s t v.1,ht]; simp [geoTruck,hk]
+      simpa [geoTruck,mapLabel,geo_ferry_at r s f v.2 hk] using
+        (LabelStep.disembark (w := r.world) (geoState r s) t f hs v)
+  | sail f b hr hne v =>
+    cases hk : r.keepF f
+    · exact Or.inl (geo_ferry_update_drop r s f b hk hr vf vt).symm
+    · rw [geo_ferry_update_keep r s f b v.1 hk]
+      have hf := geo_ferry_at r s f v.1 hk
+      by_cases he : r.loc (s.ferry f) = r.loc b
+      · left
+        have hh : r.loc b = (geoState r s).ferry f := by rw [hf,he]
+        rw [hh,setAt_current]
+      · right
+        exact ⟨hk,LabelStep.sail (geoState r s) f (r.loc b) ⟨hk,b,hr,rfl⟩
+          (by rw [hf]; exact he) ⟨v.1,r.locBound b v.2⟩⟩
+  | load p t a hp ht room v =>
+    rw [geo_parcel_update]
+    cases hk : r.keepP p
+    · left
+      have hh : geoParcel r p (.onTruck t) = (geoState r s).parcel p := by simp [geoState,geoParcel,hk]
+      rw [hh,setAt_current]
+    · right
+      have htr : (geoState r s).truck t = .land (r.loc a) := by
+        rw [geo_truck_at r s t v.2.1,ht]; rfl
+      have hpa : (geoState r s).parcel p = .ground (r.loc a) := by simp [geoState,geoParcel,hp,hk]
+      refine ⟨hk,?_⟩
+      have hb := geo_load_le r s t
+      have hc : load r.world (geoState r s) t + r.world.weight p ≤ r.world.capacity t := by
+        change load r.world (geoState r s) t + w.weight p ≤ w.capacity t
+        omega
+      simpa [geoParcel,hk,mapLabel] using
+        (LabelStep.load (w := r.world) (geoState r s) p t (r.loc a) hpa htr hc
+          ⟨v.1,v.2.1,r.locBound a v.2.2⟩)
+  | unload p t a hp ht v =>
+    rw [geo_parcel_update]
+    cases hk : r.keepP p
+    · left
+      have hh : geoParcel r p (.ground a) = (geoState r s).parcel p := by simp [geoState,geoParcel,hk]
+      rw [hh,setAt_current]
+    · right
+      have htr : (geoState r s).truck t = .land (r.loc a) := by
+        rw [geo_truck_at r s t v.2.1,ht]; rfl
+      have hpa : (geoState r s).parcel p = .onTruck t := by simp [geoState,geoParcel,hp,hk]
+      refine ⟨hk,?_⟩
+      simpa [geoParcel,hk,mapLabel] using
+        (LabelStep.unload (w := r.world) (geoState r s) p t (r.loc a) hpa htr
+          ⟨v.1,v.2.1,r.locBound a v.2.2⟩)
+
+#print axioms label_step_complete
+#print axioms geo_load_le
+#print axioms geo_valid_occupancy
+#print axioms geo_project_label
+end IslandLogistics
