@@ -2640,7 +2640,7 @@ theorem cut_stock_le (w : World) (side : Nat → Bool) (s : State) :
     cutStockCount w side s ≤ w.trucks := by
   unfold cutStockCount
   have h := sumN_mono (fun t => if side (physicalTruck s t) then 1 else 0)
-    (fun _ => 1) w.trucks (by intro q hq; split <;> omega)
+    (fun _ => 1) w.trucks (by intro q hq; cases he : side (physicalTruck s q) <;> simp [he])
   have eq : sumN (fun _ => 1) w.trucks = w.trucks := by
     induction w.trucks with
     | zero => rfl
@@ -2650,7 +2650,7 @@ theorem cut_stock_le (w : World) (side : Nat → Bool) (s : State) :
 theorem step_flux_balance (w : World) (side : Nat → Bool) (s u : State) :
     (enteringTrucks w side s u).length + cutStockCount w side s =
       (leavingTrucks w side s u).length + cutStockCount w side u := by
-  unfold enteringTrucks leavingTrucks cutStockCount
+  simp only [leavingTrucks,enteringTrucks,cutStockCount]
   rw [filtered_count_eq_sum,filtered_count_eq_sum,← sumN_add,← sumN_add]
   apply sumN_congr
   intro t ht
@@ -2662,8 +2662,8 @@ theorem path_flux_balance (w : World) (side : Nat → Bool)
     i + cutStockCount w side s = o + cutStockCount w side u := by
   induction path with
   | nil s => simp
-  | cons st tail ih =>
-    have hh := step_flux_balance w side _ _
+  | @cons s v u a b m h i o st tail ih =>
+    have hh := step_flux_balance w side s v
     omega
 
 -- The aggregate cut profile in ex1.py is now bounded directly by
