@@ -2502,3 +2502,192 @@ theorem legal_step_crossing_groups (w : World) (side : Nat → Bool)
 #print axioms selectedWeight_carrier_le
 #print axioms legal_step_crossing_groups
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+def leavingTrucks (w : World) (side : Nat → Bool) (s u : State) : List Nat :=
+  enteringTrucks w (fun v => !side v) s u
+
+-- Counts are derived from the real endpoints of each primitive step.
+-- One SAIL may contribute several truck crossings; no assumption that
+-- a primitive can move at most one truck is used.
+inductive FluxPath (w : World) (side : Nat → Bool) :
+    State → State → Nat → Nat → Nat → Nat → Prop where
+  | nil (s : State) : FluxPath w side s s 0 0 0 0
+  | cons {s v u : State} {a b m h i o : Nat} :
+      Step w s v a b → FluxPath w side v u m h i o →
+      FluxPath w side s u (a+m) (b+h)
+        ((enteringTrucks w side s v).length+i)
+        ((leavingTrucks w side s v).length+o)
+
+theorem flux_from_path (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h) :
+    ∃ i o, FluxPath w side s u m h i o := by
+  induction path with
+  | nil s => exact ⟨0,0,FluxPath.nil s⟩
+  | cons st tail ih =>
+    obtain ⟨i,o,p⟩ := ih
+    exact ⟨_,_,FluxPath.cons st p⟩
+
+theorem flatten_append_nat (xs ys : List (List Nat)) :
+    (xs++ys).flatten = xs.flatten ++ ys.flatten := by
+  induction xs with
+  | nil => rfl
+  | cons x xs ih => simp [List.flatten,ih,List.append_assoc]
+
+-- Extract a feasible group per actual inward truck crossing. Each
+-- selected parcel is assigned to its FIRST inward crossing along the
+-- concrete path. This includes arbitrary transfers and ferry occupancy.
+theorem flux_path_groups (w : World) (side : Nat → Bool)
+    {s u : State} {m h i o : Nat} (path : FluxPath w side s u m h i o)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (sel : Nat → Bool)
+    (needs : ∀ p, p < w.parcels → sel p = true →
+      side (physicalParcel s p) = false ∧ side (w.goal p) = true) :
+    ∃ groups : List (List Nat),
+      List.Perm (selectedWeights w sel) groups.flatten ∧
+      (∀ g ∈ groups, g.sum ≤ C) ∧ groups.length = i := by
+  induction path generalizing sel with
+  | nil s =>
+    have hfalse : ∀ p, p < w.parcels → sel p = false := by
+      intro p hp
+      cases hs : sel p with
+      | false => rfl
+      | true =>
+        have hh := needs p hp hs
+        have hd := done p hp
+        simp [physicalParcel,hd,hh.2] at hh
+    exact ⟨[],by simp [selectedWeight_empty w sel hfalse],by simp, rfl⟩
+  | @cons s v u a b m h i o st tail ih =>
+    let moved : Nat → Bool := fun p => sel p && side (physicalParcel v p)
+    let remain : Nat → Bool := fun p => sel p && !side (physicalParcel v p)
+    have moveCond : ∀ p, p < w.parcels → moved p = true →
+        side (physicalParcel s p) = false ∧ side (physicalParcel v p) = true := by
+      intro p hp hs
+      have hh : sel p = true ∧ side (physicalParcel v p) = true := by
+        simpa [moved] using hs
+      exact ⟨(needs p hp hh.1).1,hh.2⟩
+    have remCond : ∀ p, p < w.parcels → remain p = true →
+        side (physicalParcel v p) = false ∧ side (w.goal p) = true := by
+      intro p hp hs
+      have hh : sel p = true ∧ side (physicalParcel v p) = false := by
+        simpa [remain] using hs
+      exact ⟨hh.2,(needs p hp hh.1).2⟩
+    obtain ⟨gs,pg,fg,lg⟩ := legal_step_crossing_groups w side st vl vp C cap moved moveCond
+    have vload := step_valid_load w st vl
+    have vowner := step_valid_parcel_carriers w st vp
+    have next : ∃ groups : List (List Nat),
+        List.Perm (selectedWeights w remain) groups.flatten ∧
+        (∀ g ∈ groups, g.sum ≤ C) ∧ groups.length = i := by
+      apply ih <;> assumption
+    obtain ⟨rs,pr,fr,lr⟩ := next
+    refine ⟨gs++rs,?_,?_,?_⟩
+    · have spl := selectedWeight_split w sel (fun p => side (physicalParcel v p))
+      have comb := List.Perm.append pg pr
+      rw [flatten_append_nat]
+      exact spl.trans comb
+    · intro g hg
+      rcases List.mem_append.mp hg with left | right
+      · exact fg g left
+      · exact fr g right
+    · simp [lg,lr]
+
+def inwardSelection (w : World) (side : Nat → Bool) (s : State) : Nat → Bool :=
+  fun p => !side (physicalParcel s p) && side (w.goal p)
+
+def binInward (w : World) (side : Nat → Bool) (s : State) (C : Nat) (seed : BinState) : Nat :=
+  let ws := selectedWeights w (inwardSelection w side s)
+  (binDP C seed ws.length ws).1
+
+theorem flux_inward_bin_bound (w : World) (side : Nat → Bool)
+    {s u : State} {m h i o : Nat} (path : FluxPath w side s u m h i o)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (seed : BinState) :
+    binInward w side s C seed ≤ i := by
+  obtain ⟨gs,pg,fg,lg⟩ :=
+    flux_path_groups w side path done vl vp C cap (inwardSelection w side s)
+      (by intro p hp hs; simpa [inwardSelection] using hs)
+  have h := binDP_le_feasible_groups C seed _ gs pg fg
+  rw [lg] at h
+  exact h
+
+theorem flux_complement (w : World) (side : Nat → Bool)
+    {s u : State} {m h i o : Nat} (path : FluxPath w side s u m h i o) :
+    FluxPath w (fun v => !side v) s u m h o i := by
+  induction path with
+  | nil s => exact FluxPath.nil s
+  | cons st tail ih =>
+    have h := FluxPath.cons st ih
+    simpa [leavingTrucks] using h
+
+def cutStockCount (w : World) (side : Nat → Bool) (s : State) : Nat :=
+  sumN (fun t => if side (physicalTruck s t) then 1 else 0) w.trucks
+
+theorem filtered_count_eq_sum (n : Nat) (sel : Nat → Bool) :
+    ((List.range n).filter sel).length = sumN (fun p => if sel p then 1 else 0) n := by
+  have eq : ∀ xs : List Nat, (xs.filter sel).length = ((xs.filter sel).map (fun _ => (1:Nat))).sum := by
+    intro xs
+    induction xs with
+    | nil => rfl
+    | cons x xs ih =>
+      cases hs : sel x <;> simp [hs,ih,Nat.add_comm]
+  rw [eq,filter_map_sum_nat,sum_range_eq_sumN]
+
+theorem cut_stock_le (w : World) (side : Nat → Bool) (s : State) :
+    cutStockCount w side s ≤ w.trucks := by
+  unfold cutStockCount
+  have h := sumN_mono (fun t => if side (physicalTruck s t) then 1 else 0)
+    (fun _ => 1) w.trucks (by intro q hq; split <;> omega)
+  have eq : sumN (fun _ => 1) w.trucks = w.trucks := by
+    induction w.trucks with
+    | zero => rfl
+    | succ n ih => simp [sumN,ih]
+  omega
+
+theorem step_flux_balance (w : World) (side : Nat → Bool) (s u : State) :
+    (enteringTrucks w side s u).length + cutStockCount w side s =
+      (leavingTrucks w side s u).length + cutStockCount w side u := by
+  unfold enteringTrucks leavingTrucks cutStockCount
+  rw [filtered_count_eq_sum,filtered_count_eq_sum,← sumN_add,← sumN_add]
+  apply sumN_congr
+  intro t ht
+  cases hs : side (physicalTruck s t) <;>
+    cases hu : side (physicalTruck u t) <;> simp [hs,hu]
+
+theorem path_flux_balance (w : World) (side : Nat → Bool)
+    {s u : State} {m h i o : Nat} (path : FluxPath w side s u m h i o) :
+    i + cutStockCount w side s = o + cutStockCount w side u := by
+  induction path with
+  | nil s => simp
+  | cons st tail ih =>
+    have hh := step_flux_balance w side _ _
+    omega
+
+-- The aggregate cut profile in ex1.py is now bounded directly by
+-- actual truck crossings of every legal path: there are no I/O
+-- demand premises left in this theorem.
+theorem concrete_cut_profile_bound (w : World) (side : Nat → Bool)
+    {s u : State} {m h i o : Nat} (path : FluxPath w side s u m h i o)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (seed : BinState) :
+    let I := binInward w side s C seed
+    let O := binInward w (fun v => !side v) s C seed
+    let stock := cutStockCount w side s
+    max (I+O) (max (2*I-(w.trucks-stock)) (2*O-stock)) ≤ i+o := by
+  have hi := flux_inward_bin_bound w side path done vl vp C cap seed
+  have ho := flux_inward_bin_bound w (fun v => !side v) (flux_complement w side path) done vl vp C cap seed
+  have hb := path_flux_balance w side path
+  have hs := cut_stock_le w side s
+  have hu := cut_stock_le w side u
+  dsimp
+  omega
+
+#print axioms flux_path_groups
+#print axioms flux_inward_bin_bound
+#print axioms path_flux_balance
+#print axioms concrete_cut_profile_bound
+end IslandLogistics
