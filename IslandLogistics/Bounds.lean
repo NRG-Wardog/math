@@ -3852,7 +3852,8 @@ theorem digitSelector_trace_owner (w : World)
   simp only [List.any_eq_true,List.mem_map] at sel
   obtain ⟨q,⟨x,hx,rfl⟩,he⟩ := sel
   have hh : x = p ∧ traceDigit w tr x = t := by simpa using he
-  obtain ⟨rfl,hd⟩ := hh
+  obtain ⟨heq,hd⟩ := hh
+  subst x
   have ha : p < w.parcels ∧ s.parcel p ≠ .ground (w.goal p) := by
     simpa [activeParcels] using hx
   apply trace_selector_owner w tr t ht p
