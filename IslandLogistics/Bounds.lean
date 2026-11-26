@@ -3068,3 +3068,199 @@ theorem road_cut_sum_admissible (w : World) (sys : RoadCutSystem w)
 #print axioms trace_road_cut_budget
 #print axioms road_cut_sum_admissible
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Unlike the earlier existential carrier segment, these functions refer
+-- to the very same reified legal trace used to count all cut crossings.
+def traceCarrier (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (p : Nat) : Option Nat :=
+  match tr with
+  | .nil s => jobOwner s p
+  | @LegalTrace.cons _ s v u a b m h st tail =>
+    match s.parcel p with
+    | .onTruck t => some t
+    | .ground _ => traceCarrier w tail p
+
+def traceSafe (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (p : Nat) : Prop :=
+  match tr with
+  | .nil _ => True
+  | @LegalTrace.cons _ s v u a b m h st tail =>
+    extraOne w s v p = 0 ∧ traceSafe w tail p
+
+theorem traceCarrier_held (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (p t : Nat)
+    (held : s.parcel p = .onTruck t) :
+    traceCarrier w tr p = some t := by
+  cases tr <;> simp [traceCarrier,jobOwner,held]
+
+theorem traceCarrier_tail_active (w : World)
+    {s v u : State} {a b m h : Nat} (st : Step w s v a b)
+    (tail : LegalTrace w v u m h) (p : Nat)
+    (safe : extraOne w s v p = 0)
+    (active : v.parcel p ≠ .ground (w.goal p)) :
+    traceCarrier w (LegalTrace.cons st tail) p = traceCarrier w tail p := by
+  cases hp : s.parcel p with
+  | ground x => simp [traceCarrier,hp]
+  | onTruck t =>
+    rcases held_job_step w p t st hp safe with hold | done
+    · rw [traceCarrier_held w (LegalTrace.cons st tail) p t hp,
+        traceCarrier_held w tail p t hold]
+    · exact False.elim (active done.1)
+
+def truckIn (side : Nat → Bool) (t : Nat) (s u : State) : Nat :=
+  if !side (physicalTruck s t) && side (physicalTruck u t) then 1 else 0
+
+def truckOut (side : Nat → Bool) (t : Nat) (s u : State) : Nat :=
+  truckIn (fun v => !side v) t s u
+
+def traceTruckIn (w : World) (side : Nat → Bool) (t : Nat)
+    {s u : State} {m h : Nat} : LegalTrace w s u m h → Nat
+  | .nil _ => 0
+  | @LegalTrace.cons _ s v u a b m h st tail =>
+    truckIn side t s v + traceTruckIn w side t tail
+
+theorem traceTruckIn_complement (w : World) (side : Nat → Bool) (t : Nat)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) :
+    traceTruckIn w (fun x => !(!side x)) t tr = traceTruckIn w side t tr := by
+  have he : (fun x => !(!side x)) = side := by
+    funext x; cases side x <;> rfl
+  rw [he]
+
+theorem truck_crossing_group (w : World) (side : Nat → Bool) (t : Nat)
+    {s v u : State} {a b m h : Nat} (st : Step w s v a b)
+    (tail : LegalTrace w v u m h)
+    (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (ht : t < w.trucks) (sel : Nat → Bool)
+    (owners : ∀ p, p < w.parcels → sel p = true →
+      traceCarrier w (LegalTrace.cons st tail) p = some t)
+    (moves : ∀ p, p < w.parcels → sel p = true →
+      side (physicalParcel s p) = false ∧ side (physicalParcel v p) = true) :
+    ∃ groups : List (List Nat),
+      List.Perm (selectedWeights w sel) groups.flatten ∧
+      (∀ g ∈ groups, g.sum ≤ w.capacity t) ∧
+      groups.length = truckIn side t s v := by
+  have holds : ∀ p, p < w.parcels → sel p = true →
+      s.parcel p = .onTruck t ∧ v.parcel p = .onTruck t := by
+    intro p hp hs
+    have d := moves p hp hs
+    have hd : side (physicalParcel s p) ≠ side (physicalParcel v p) := by
+      rw [d.1,d.2]; decide
+    obtain ⟨q,hq,he,hv⟩ := parcel_side_change_carrier w side st vp p hp hd
+    have hown := traceCarrier_held w (LegalTrace.cons st tail) p q he
+    rw [owners p hp hs] at hown
+    have eq := Option.some.inj hown
+    subst q
+    exact ⟨he,hv⟩
+  by_cases hc : truckIn side t s v = 1
+  · refine ⟨[selectedWeights w sel],by simp,?_,by simp [hc]⟩
+    intro g hg
+    have eq : g = selectedWeights w sel := by simpa using hg
+    subst g
+    exact Nat.le_trans (selectedWeight_carrier_le w s t sel (fun p hp hs => (holds p hp hs).1)) (vl t ht)
+  · have hz : truckIn side t s v = 0 := by
+      unfold truckIn at *
+      split at hc ⊢ <;> simp_all
+    have hzero : ∀ p, p < w.parcels → sel p = false := by
+      intro p hp
+      cases hs : sel p with
+      | false => rfl
+      | true =>
+        have h := holds p hp hs
+        have d := moves p hp hs
+        have ho : side (physicalTruck s t) = false := by simpa [physicalParcel,h.1] using d.1
+        have hi : side (physicalTruck v t) = true := by simpa [physicalParcel,h.2] using d.2
+        simp [truckIn,ho,hi] at hc
+    exact ⟨[],by simp [selectedWeight_empty w sel hzero],by simp,by simp [hz]⟩
+
+-- Every inward-demand direct job assigned to t is placed in a group
+-- corresponding to an actual inward crossing of t on THIS trace.
+theorem trace_assigned_groups (w : World) (side : Nat → Bool) (t : Nat)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (ht : t < w.trucks) (sel : Nat → Bool)
+    (owners : ∀ p, p < w.parcels → sel p = true →
+      traceCarrier w tr p = some t ∧ traceSafe w tr p)
+    (needs : ∀ p, p < w.parcels → sel p = true →
+      side (physicalParcel s p) = false ∧ side (w.goal p) = true) :
+    ∃ groups : List (List Nat),
+      List.Perm (selectedWeights w sel) groups.flatten ∧
+      (∀ g ∈ groups, g.sum ≤ w.capacity t) ∧
+      groups.length = traceTruckIn w side t tr := by
+  induction tr generalizing sel with
+  | nil s =>
+    have hfalse : ∀ p, p < w.parcels → sel p = false := by
+      intro p hp
+      cases hs : sel p with
+      | false => rfl
+      | true =>
+        have hh := needs p hp hs
+        have hd := done p hp
+        simp [physicalParcel,hd,hh.2] at hh
+    exact ⟨[],by simp [selectedWeight_empty w sel hfalse],by simp,rfl⟩
+  | @cons s v u a b m h st tail ih =>
+    let moved : Nat → Bool := fun p => sel p && side (physicalParcel v p)
+    let remain : Nat → Bool := fun p => sel p && !side (physicalParcel v p)
+    have moveCond : ∀ p, p < w.parcels → moved p = true →
+        side (physicalParcel s p) = false ∧ side (physicalParcel v p) = true := by
+      intro p hp hs
+      have hh : sel p = true ∧ side (physicalParcel v p) = true := by simpa [moved] using hs
+      exact ⟨(needs p hp hh.1).1,hh.2⟩
+    have remCond : ∀ p, p < w.parcels → remain p = true →
+        side (physicalParcel v p) = false ∧ side (w.goal p) = true := by
+      intro p hp hs
+      have hh : sel p = true ∧ side (physicalParcel v p) = false := by simpa [remain] using hs
+      exact ⟨hh.2,(needs p hp hh.1).2⟩
+    have remOwn : ∀ p, p < w.parcels → remain p = true →
+        traceCarrier w tail p = some t ∧ traceSafe w tail p := by
+      intro p hp hs
+      have hh : sel p = true ∧ side (physicalParcel v p) = false := by simpa [remain] using hs
+      have own := owners p hp hh.1
+      have hsafe := own.2
+      change extraOne w s v p = 0 ∧ traceSafe w tail p at hsafe
+      have active : v.parcel p ≠ .ground (w.goal p) := by
+        intro eq
+        have hr := remCond p hp hs
+        simp [physicalParcel,eq,hr.2] at hr
+      have eq := traceCarrier_tail_active w st tail p hsafe.1 active
+      exact ⟨eq.symm.trans own.1,hsafe.2⟩
+    obtain ⟨gs,pg,fg,lg⟩ := truck_crossing_group w side t st tail vl vp ht moved
+      (by
+        intro p hp hs
+        have hh : sel p = true ∧ side (physicalParcel v p) = true := by simpa [moved] using hs
+        exact (owners p hp hh.1).1) moveCond
+    obtain ⟨rs,pr,fr,lr⟩ := ih (step_valid_load w st vl)
+      (step_valid_parcel_carriers w st vp) remain remOwn remCond
+    refine ⟨gs++rs,?_,?_,?_⟩
+    · have spl := selectedWeight_split w sel (fun p => side (physicalParcel v p))
+      rw [flatten_append_nat]
+      exact spl.trans (List.Perm.append pg pr)
+    · intro g hg
+      rcases List.mem_append.mp hg with left | right
+      · exact fg g left
+      · exact fr g right
+    · simp [traceTruckIn,lg,lr]
+
+theorem trace_assigned_bin_bound (w : World) (side : Nat → Bool) (t : Nat)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (ht : t < w.trucks) (sel : Nat → Bool)
+    (owners : ∀ p, p < w.parcels → sel p = true →
+      traceCarrier w tr p = some t ∧ traceSafe w tr p)
+    (needs : ∀ p, p < w.parcels → sel p = true →
+      side (physicalParcel s p) = false ∧ side (w.goal p) = true)
+    (seed : BinState) :
+    (binDP (w.capacity t) seed (selectedWeights w sel).length (selectedWeights w sel)).1 ≤
+      traceTruckIn w side t tr := by
+  obtain ⟨gs,pg,fg,lg⟩ := trace_assigned_groups w side t tr done vl vp ht sel owners needs
+  have h := binDP_le_feasible_groups (w.capacity t) seed _ gs pg fg
+  rw [lg] at h
+  exact h
+
+#print axioms traceCarrier_tail_active
+#print axioms truck_crossing_group
+#print axioms trace_assigned_groups
+#print axioms trace_assigned_bin_bound
+end IslandLogistics
