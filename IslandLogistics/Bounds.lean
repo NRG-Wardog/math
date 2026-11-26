@@ -3491,3 +3491,188 @@ theorem concrete_direct_profile_bound (w : World) (side : Nat → Bool)
 #print axioms trace_in_sum_trucks
 #print axioms concrete_direct_profile_bound
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+def traceExtra (w : World) {s u : State} {m h : Nat} :
+    LegalTrace w s u m h → Nat
+  | .nil _ => 0
+  | @LegalTrace.cons _ s v u a b m h st tail =>
+    extraUnload w s v + traceExtra w tail
+
+def traceFlag (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (p : Nat) : Bool :=
+  match tr with
+  | .nil _ => false
+  | @LegalTrace.cons _ s v u a b m h st tail =>
+    decide (extraOne w s v p ≠ 0) || traceFlag w tail p
+
+theorem trace_residual (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) : ResidualPath w s u m h (traceExtra w tr) := by
+  induction tr with
+  | nil s => exact ResidualPath.nil s
+  | cons st tail ih => exact ResidualPath.cons st ih
+
+theorem trace_flags (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) : FlaggedPath w s u m h (traceExtra w tr) (traceFlag w tr) := by
+  induction tr with
+  | nil s => exact FlaggedPath.nil s
+  | cons st tail ih => exact FlaggedPath.cons st ih
+
+theorem trace_flag_safe (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (p : Nat) :
+    traceFlag w tr p = false ↔ traceSafe w tr p := by
+  induction tr with
+  | nil s => simp [traceFlag,traceSafe]
+  | cons st tail ih => simp [traceFlag,traceSafe,Bool.or_eq_false_iff,ih]
+
+theorem trace_carrier_exists (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (done : Goal w u)
+    (vp : ValidParcelCarriers w s) (vf : ValidParcelFit w s)
+    (p : Nat) (hp : p < w.parcels) (active : s.parcel p ≠ .ground (w.goal p)) :
+    ∃ t, traceCarrier w tr p = some t ∧ t < w.trucks ∧
+      w.weight p ≤ w.capacity t ∧ (jobOwner s p = none ∨ jobOwner s p = some t) := by
+  induction tr with
+  | nil s => exact False.elim (active (done p hp))
+  | @cons s v u a b m h st tail ih =>
+    cases hpos : s.parcel p with
+    | onTruck t =>
+      exact ⟨t,traceCarrier_held w (LegalTrace.cons st tail) p t hpos,
+        vp p hp t hpos,vf p hp t hpos,Or.inr (by simp [jobOwner,hpos])⟩
+    | ground x =>
+      rcases ground_job_step w p x st hpos with same | pickup
+      · have av : v.parcel p ≠ .ground (w.goal p) := by
+          rw [same]; intro e; exact active (hpos.trans e)
+        obtain ⟨t,car,valid,fit,own⟩ := ih done (step_valid_parcel_carriers w st vp)
+          (step_parcel_fit w st vf) av
+        exact ⟨t,by simpa [traceCarrier,hpos] using car,valid,fit,Or.inl (by simp [jobOwner,hpos])⟩
+      · obtain ⟨t,held,truck,valid,fit,hm,hh⟩ := pickup
+        have car := traceCarrier_held w tail p t held
+        exact ⟨t,by simpa [traceCarrier,hpos] using car,valid,fit,Or.inl (by simp [jobOwner,hpos])⟩
+
+def traceDigit (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (p : Nat) : Nat :=
+  if traceFlag w tr p then w.trucks else (traceCarrier w tr p).getD w.trucks
+
+def traceDigits (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) : List Nat :=
+  (activeParcels w s).map (traceDigit w tr)
+
+def traceSelector (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (t p : Nat) : Bool :=
+  (s.parcel p != .ground (w.goal p)) && (traceDigit w tr p == t)
+
+theorem trace_selector_owner (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (t : Nat) (ht : t < w.trucks)
+    (p : Nat) (sel : traceSelector w tr t p = true) :
+    s.parcel p ≠ .ground (w.goal p) ∧
+      traceCarrier w tr p = some t ∧ traceSafe w tr p := by
+  have h : s.parcel p ≠ .ground (w.goal p) ∧ traceDigit w tr p = t := by
+    simpa [traceSelector] using sel
+  have flag : traceFlag w tr p = false := by
+    cases hf : traceFlag w tr p with
+    | false => rfl
+    | true =>
+      have hh := h.2
+      simp [traceDigit,hf] at hh
+      omega
+  have car : traceCarrier w tr p = some t := by
+    have hh := h.2
+    simp [traceDigit,flag] at hh
+    cases hc : traceCarrier w tr p with
+    | none => simp [hc] at hh; omega
+    | some q => simpa [hc] using hh
+  exact ⟨h.1,car,(trace_flag_safe w tr p).mp flag⟩
+
+theorem trace_digit_valid (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (done : Goal w u)
+    (vp : ValidParcelCarriers w s) (vf : ValidParcelFit w s)
+    (caps : List Nat) (cl : caps.length = w.trucks)
+    (cv : ∀ t, t < w.trucks → caps.getD t 0 = w.capacity t)
+    (p : Nat) (hp : p < w.parcels) (active : s.parcel p ≠ .ground (w.goal p)) :
+    traceDigit w tr p < caps.length+1 ∧
+      admissibleDigit caps (concreteJob w s p) (traceDigit w tr p) = true ∧
+      (if traceDigit w tr p = caps.length then 2 else 0) =
+        (if traceFlag w tr p then 2 else 0) := by
+  cases hf : traceFlag w tr p with
+  | true => simp [traceDigit,hf,cl,admissibleDigit]
+  | false =>
+    obtain ⟨t,car,valid,fit,own⟩ := trace_carrier_exists w tr done vp vf p hp active
+    have ht : t < caps.length := by omega
+    have ne : t ≠ caps.length := by omega
+    have hfit : w.weight p ≤ caps.getD t 0 := by rw [cv t valid]; exact fit
+    have hfit' : w.weight p ≤ caps[t] := by simpa [ht] using hfit
+    rcases own with own | own <;> simp [traceDigit,hf,car,admissibleDigit,concreteJob,ne,ht,hfit,hfit',own]
+    all_goals omega
+
+theorem trace_digits_membership (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (done : Goal w u)
+    (vp : ValidParcelCarriers w s) (vf : ValidParcelFit w s)
+    (caps : List Nat) (cl : caps.length = w.trucks)
+    (cv : ∀ t, t < w.trucks → caps.getD t 0 = w.capacity t)
+    (ids : List Nat) (valid : ∀ p ∈ ids, p < w.parcels ∧ s.parcel p ≠ .ground (w.goal p)) :
+    (∀ d ∈ ids.map (traceDigit w tr), d < caps.length+1) ∧
+    admissibleDigits caps (selectedJobs w s ids) (ids.map (traceDigit w tr)) = true ∧
+    omittedPenalty caps.length (ids.map (traceDigit w tr)) =
+      (ids.map (fun p => if traceFlag w tr p then 2 else 0)).sum := by
+  induction ids with
+  | nil => simp [selectedJobs,admissibleDigits,omittedPenalty]
+  | cons p ps ih =>
+    obtain ⟨hp,ha⟩ := valid p (by simp)
+    obtain ⟨hb,hf,he⟩ := trace_digit_valid w tr done vp vf caps cl cv p hp ha
+    obtain ⟨rb,rf,re⟩ := ih (fun q hq => valid q (List.mem_cons_of_mem _ hq))
+    constructor
+    · intro d hd
+      simp only [List.map_cons,List.mem_cons] at hd
+      rcases hd with eq | hm
+      · subst d; exact hb
+      · exact rb d hm
+    constructor
+    · change (admissibleDigit caps (concreteJob w s p) (traceDigit w tr p) &&
+        admissibleDigits caps (selectedJobs w s ps) (ps.map (traceDigit w tr))) = true
+      simp [hf,rf]
+    · simp [omittedPenalty,he,re]
+
+-- The exact same assignment digits select every per-truck profile
+-- and pay for omissions. There is no independent witness per cut.
+theorem trace_assignment_column (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (done : Goal w u)
+    (vp : ValidParcelCarriers w s) (vf : ValidParcelFit w s)
+    (caps : List Nat) (cl : caps.length = w.trucks)
+    (cv : ∀ t, t < w.trucks → caps.getD t 0 = w.capacity t) :
+    traceDigits w tr ∈ assignmentColumns caps (selectedJobs w s (activeParcels w s)) ∧
+      handling w s + omittedPenalty caps.length (traceDigits w tr) ≤ h := by
+  have valid : ∀ p ∈ activeParcels w s,
+      p < w.parcels ∧ s.parcel p ≠ .ground (w.goal p) := by
+    intro p hp; simpa [activeParcels] using hp
+  obtain ⟨hb,hf,he⟩ := trace_digits_membership w tr done vp vf caps cl cv
+    (activeParcels w s) valid
+  constructor
+  · apply assignment_column_complete
+    · simp [traceDigits,selectedJobs]
+    · exact hb
+    · exact hf
+  · have hh := residual_goal_budget w (trace_residual w tr) done
+    have hf := flags_cost w (trace_flags w tr)
+    have ha := active_flags_cost w s (traceFlag w tr)
+    unfold traceDigits
+    rw [he]
+    omega
+
+theorem actual_trace_direct_profile (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (seed : BinState) :
+    directPhysicalProfile w side s u C (traceSelector w tr) seed ≤
+      (traceIn w side tr : Int) + traceOut w side tr := by
+  apply concrete_direct_profile_bound w side tr done vl vp C cap
+  intro t ht p hp sel
+  exact trace_selector_owner w tr t ht p sel
+
+#print axioms trace_carrier_exists
+#print axioms trace_selector_owner
+#print axioms trace_assignment_column
+#print axioms actual_trace_direct_profile
+end IslandLogistics
