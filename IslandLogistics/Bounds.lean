@@ -2157,3 +2157,163 @@ theorem binDP_le_feasible_groups (C : Nat) (seed : BinState)
 #print axioms binWitness_groups
 #print axioms binDP_le_feasible_groups
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- The real LOAD/UNLOAD rules preserve the *total* capacity invariant,
+-- not merely each individual package's ability to fit the carrier.
+def ValidTruckLoad (w : World) (s : State) : Prop :=
+  ∀ t, t < w.trucks → load w s t ≤ w.capacity t
+
+theorem sumN_one_delta (f g : Nat → Nat) (p n k : Nat)
+    (hp : p < n) (heq : ∀ q, q ≠ p → f q = g q)
+    (hdelta : f p = g p + k) :
+    sumN f n = sumN g n + k := by
+  induction n with
+  | zero => omega
+  | succ n ih =>
+    by_cases e : n = p
+    · subst n
+      have h := sumN_congr f g p (fun q hq => heq q (by omega))
+      simp only [sumN]
+      omega
+    · have hh : p < n := by omega
+      have h := ih hh
+      have eq := heq n e
+      simp only [sumN]
+      omega
+
+theorem load_after_load (w : World) (s : State) (p t a : Nat)
+    (hp : p < w.parcels) (hg : s.parcel p = .ground a) :
+    load w {s with parcel := setAt s.parcel p (.onTruck t)} t =
+      load w s t + w.weight p := by
+  unfold load
+  apply sumN_one_delta _ _ p _ _ hp
+  · intro q hq
+    simp [setAt,hq]
+  · simp [setAt,hg]
+
+theorem load_after_unload (w : World) (s : State) (p t a : Nat)
+    (hp : p < w.parcels) (hc : s.parcel p = .onTruck t) :
+    load w s t =
+      load w {s with parcel := setAt s.parcel p (.ground a)} t + w.weight p := by
+  unfold load
+  apply sumN_one_delta _ _ p _ _ hp
+  · intro q hq
+    simp [setAt,hq]
+  · simp [setAt,hc]
+
+theorem step_valid_load (w : World) {s u : State} {m h : Nat}
+    (st : Step w s u m h) (v : ValidTruckLoad w s) :
+    ValidTruckLoad w u := by
+  cases st with
+  | load p t a hp ht room valid =>
+    intro q hq
+    by_cases e : q = t
+    · subst q
+      rw [load_after_load w s p t a valid.1 hp]
+      exact room
+    · have eq : load w {s with parcel := setAt s.parcel p (.onTruck t)} q = load w s q := by
+        unfold load
+        apply sumN_congr
+        intro x hx
+        by_cases ex : x = p
+        · subst x
+          simp [setAt,hp,Ne.symm e]
+        · simp [setAt,ex]
+      rw [eq]
+      exact v q hq
+  | unload p t a hp ht valid =>
+    intro q hq
+    by_cases e : q = t
+    · subst q
+      have hh := load_after_unload w s p t a valid.1 hp
+      have hv := v t hq
+      omega
+    · have eq : load w {s with parcel := setAt s.parcel p (.ground a)} q = load w s q := by
+        unfold load
+        apply sumN_congr
+        intro x hx
+        by_cases ex : x = p
+        · subst x
+          simp [setAt,hp,Ne.symm e]
+        · simp [setAt,ex]
+      rw [eq]
+      exact v q hq
+  | drive t a b ht hr valid => exact v
+  | board t f a ht hf hr room valid => exact v
+  | disembark t f ht valid => exact v
+  | sail f b hr hne valid => exact v
+
+theorem path_valid_load (w : World) {s u : State} {m h : Nat}
+    (path : Path (Step w) s u m h) (v : ValidTruckLoad w s) :
+    ValidTruckLoad w u := by
+  induction path with
+  | nil s => exact v
+  | cons st rest ih => exact ih (step_valid_load w st v)
+
+-- A parcel's physical side can change only while it is carried by
+-- the same truck at both endpoints of a legal primitive transition.
+theorem parcel_side_change_carrier (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (st : Step w s u m h)
+    (vp : ValidParcelCarriers w s) (p : Nat) (hp : p < w.parcels)
+    (diff : side (physicalParcel s p) ≠ side (physicalParcel u p)) :
+    ∃ t, t < w.trucks ∧ s.parcel p = .onTruck t ∧ u.parcel p = .onTruck t := by
+  cases st with
+  | drive t a b ht hr valid =>
+    cases eq : s.parcel p with
+    | ground x => simp [physicalParcel,eq] at diff
+    | onTruck q => exact ⟨q,vp p hp q eq,eq,eq⟩
+  | board t f a ht hf hr room valid =>
+    cases eq : s.parcel p with
+    | ground x => simp [physicalParcel,eq] at diff
+    | onTruck q => exact ⟨q,vp p hp q eq,eq,eq⟩
+  | disembark t f ht valid =>
+    cases eq : s.parcel p with
+    | ground x => simp [physicalParcel,eq] at diff
+    | onTruck q => exact ⟨q,vp p hp q eq,eq,eq⟩
+  | sail f b hr hne valid =>
+    cases eq : s.parcel p with
+    | ground x => simp [physicalParcel,eq] at diff
+    | onTruck q => exact ⟨q,vp p hp q eq,eq,eq⟩
+  | load q t a hq ht room valid =>
+    by_cases eq : p = q
+    · subst q
+      simp [physicalParcel,physicalTruck,setAt,hq,ht] at diff
+    · simp [physicalParcel,setAt,eq,physicalTruck] at diff
+  | unload q t a hq ht valid =>
+    by_cases eq : p = q
+    · subst q
+      simp [physicalParcel,physicalTruck,setAt,hq,ht] at diff
+    · simp [physicalParcel,setAt,eq,physicalTruck] at diff
+
+def enteringTrucks (w : World) (side : Nat → Bool) (s u : State) : List Nat :=
+  (List.range w.trucks).filter (fun t =>
+    !side (physicalTruck s t) && side (physicalTruck u t))
+
+def sourceOwner (s : State) (p : Nat) : Nat :=
+  match s.parcel p with
+  | .ground _ => 0
+  | .onTruck t => t
+
+theorem entering_parcel_owner (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (st : Step w s u m h)
+    (vp : ValidParcelCarriers w s) (p : Nat) (hp : p < w.parcels)
+    (outside : side (physicalParcel s p) = false)
+    (inside : side (physicalParcel u p) = true) :
+    sourceOwner s p ∈ enteringTrucks w side s u ∧
+      s.parcel p = .onTruck (sourceOwner s p) := by
+  have diff : side (physicalParcel s p) ≠ side (physicalParcel u p) := by
+    simp [outside,inside]
+  obtain ⟨t,valid,hs,hu⟩ := parcel_side_change_carrier w side st vp p hp diff
+  have ho : side (physicalTruck s t) = false := by simpa [physicalParcel,hs] using outside
+  have hi : side (physicalTruck u t) = true := by simpa [physicalParcel,hu] using inside
+  exact ⟨by simp [sourceOwner,hs,enteringTrucks,valid,ho,hi],by simp [sourceOwner,hs]⟩
+
+#print axioms step_valid_load
+#print axioms path_valid_load
+#print axioms parcel_side_change_carrier
+#print axioms entering_parcel_owner
+
+end IslandLogistics
