@@ -2071,3 +2071,89 @@ theorem binWitness_add_group (C : Nat) (xs group : List Nat)
 #print axioms binDP_count_le_witness
 #print axioms binWitness_add_group
 end IslandLogistics
+
+
+namespace IslandLogistics
+theorem removeWeight_of_mem {w : Nat} {xs : List Nat} (hm : w ∈ xs) :
+    ∃ ys, RemoveWeight w xs ys := by
+  induction xs with
+  | nil => simp at hm
+  | cons v vs ih =>
+    rw [List.mem_cons] at hm
+    rcases hm with eq | tail
+    · subst v
+      exact ⟨vs,RemoveWeight.head vs⟩
+    · obtain ⟨ys,h⟩ := ih tail
+      exact ⟨v::ys,RemoveWeight.tail v h⟩
+
+theorem removeWeight_perm {w : Nat} {xs ys : List Nat}
+    (h : RemoveWeight w xs ys) : List.Perm (w::ys) xs := by
+  induction h with
+  | head xs => exact List.Perm.refl _
+  | @tail xs ys v h ih =>
+    exact (List.Perm.swap v w ys).trans (List.Perm.cons v ih)
+
+theorem binWitness_perm (C : Nat) {xs : List Nat} {st : BinState}
+    (h : BinWitness C xs st) (zs : List Nat) (p : List.Perm zs xs) :
+    BinWitness C zs st := by
+  induction h generalizing zs with
+  | empty =>
+    have hlen := p.length_eq
+    cases zs with
+    | nil => exact BinWitness.empty
+    | cons z zs => simp at hlen
+  | @fresh xs ys w st rem fit rest ih =>
+    have pm := (removeWeight_perm rem).trans p.symm
+    have mem : w ∈ zs := pm.mem_iff.mp (by simp)
+    obtain ⟨rs,r⟩ := removeWeight_of_mem mem
+    have pc : List.Perm (w::rs) (w::ys) :=
+      (removeWeight_perm r).trans pm.symm
+    exact BinWitness.fresh r fit (ih rs pc.cons_inv)
+  | @reuse xs ys w st rem fit nonzero room rest ih =>
+    have pm := (removeWeight_perm rem).trans p.symm
+    have mem : w ∈ zs := pm.mem_iff.mp (by simp)
+    obtain ⟨rs,r⟩ := removeWeight_of_mem mem
+    have pc : List.Perm (w::rs) (w::ys) :=
+      (removeWeight_perm r).trans pm.symm
+    exact BinWitness.reuse r fit nonzero room (ih rs pc.cons_inv)
+
+theorem binWitness_groups (C : Nat) (groups : List (List Nat))
+    (xs : List Nat) (st : BinState) (start : BinWitness C xs st)
+    (feasible : ∀ g ∈ groups, g.sum ≤ C) :
+    ∃ endState, BinWitness C (xs++groups.flatten) endState ∧
+      endState.1 ≤ st.1+groups.length := by
+  induction groups generalizing xs st with
+  | nil => exact ⟨st,by simpa using start,by simp⟩
+  | cons g gs ih =>
+    have fit := feasible g (by simp)
+    have hf : ∀ q ∈ gs, q.sum ≤ C := fun q hq => feasible q (List.mem_cons_of_mem _ hq)
+    by_cases empty : g = []
+    · subst g
+      obtain ⟨e,hw,hn⟩ := ih xs st start hf
+      exact ⟨e,by simpa using hw,by simp; omega⟩
+    · have step := binWitness_add_group C xs g st start empty fit
+      obtain ⟨e,hw,hn⟩ := ih (xs++g) (st.1+1,g.sum) step hf
+      refine ⟨e,?_,?_⟩
+      · simpa [List.flatten,List.append_assoc] using hw
+      · simp
+        omega
+
+-- Every grouping of the actual multiset of parcel weights into
+-- capacity-feasible truck crossings is a witness. No optimal grouping
+-- or enumeration-completeness hypothesis is needed.
+theorem binDP_le_feasible_groups (C : Nat) (seed : BinState)
+    (xs : List Nat) (groups : List (List Nat))
+    (perm : List.Perm xs groups.flatten)
+    (feasible : ∀ g ∈ groups, g.sum ≤ C) :
+    (binDP C seed xs.length xs).1 ≤ groups.length := by
+  obtain ⟨st,hw,hb⟩ := binWitness_groups C groups [] (0,0) BinWitness.empty feasible
+  have hflat : BinWitness C groups.flatten st := by simpa using hw
+  have h := binDP_count_le_witness C seed (binWitness_perm C hflat xs perm)
+  simp at hb
+  omega
+
+#print axioms removeWeight_perm
+#print axioms binWitness_perm
+#print axioms binWitness_groups
+#print axioms binDP_le_feasible_groups
+end IslandLogistics
