@@ -2317,3 +2317,187 @@ theorem entering_parcel_owner (w : World) (side : Nat → Bool)
 #print axioms entering_parcel_owner
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+theorem perm_move_front {α : Type} (x : α) (as bs : List α) :
+    List.Perm (x::(as++bs)) (as++(x::bs)) := by
+  induction as with
+  | nil => simp
+  | cons a as ih =>
+    exact (List.Perm.swap a x (as++bs)).trans (List.Perm.cons a ih)
+
+theorem filter_partition_perm {α : Type} (xs : List α) (p : α → Bool) :
+    List.Perm xs (xs.filter p ++ xs.filter (fun x => !p x)) := by
+  induction xs with
+  | nil => simp
+  | cons x xs ih =>
+    cases h : p x with
+    | true => simpa [h] using (List.Perm.cons x ih)
+    | false =>
+      have hh := (List.Perm.cons x ih).trans
+        (perm_move_front x (xs.filter p) (xs.filter (fun x => !p x)))
+      simpa [h] using hh
+
+theorem filter_twice {α : Type} (xs : List α) (p q : α → Bool) :
+    (xs.filter p).filter q = xs.filter (fun x => p x && q x) := by
+  induction xs with
+  | nil => rfl
+  | cons x xs ih =>
+    cases hp : p x <;> cases hq : q x <;> simp [hp,hq,ih]
+
+theorem filter_empty_of_false {α : Type} (xs : List α) (p : α → Bool)
+    (h : ∀ x ∈ xs, p x = false) : xs.filter p = [] := by
+  induction xs with
+  | nil => rfl
+  | cons x xs ih =>
+    have hx := h x (by simp)
+    have hxs := ih (fun y hy => h y (List.mem_cons_of_mem _ hy))
+    simp [hx,hxs]
+
+def selectedWeights (w : World) (sel : Nat → Bool) : List Nat :=
+  ((List.range w.parcels).filter sel).map w.weight
+
+theorem selectedWeight_split (w : World) (sel pred : Nat → Bool) :
+    List.Perm (selectedWeights w sel)
+      (selectedWeights w (fun p => sel p && pred p) ++
+       selectedWeights w (fun p => sel p && !pred p)) := by
+  have h := (filter_partition_perm ((List.range w.parcels).filter sel) pred).map w.weight
+  simpa only [List.map_append,filter_twice,selectedWeights] using h
+
+theorem selectedWeight_empty (w : World) (sel : Nat → Bool)
+    (h : ∀ p, p < w.parcels → sel p = false) :
+    selectedWeights w sel = [] := by
+  unfold selectedWeights
+  rw [filter_empty_of_false _ _ (fun p hp => h p (List.mem_range.mp hp))]
+  rfl
+
+theorem filter_map_sum_nat {α : Type} (xs : List α) (sel : α → Bool)
+    (f : α → Nat) :
+    ((xs.filter sel).map f).sum =
+      (xs.map (fun x => if sel x then f x else 0)).sum := by
+  induction xs with
+  | nil => rfl
+  | cons x xs ih =>
+    cases h : sel x <;> simp [h,ih]
+
+theorem selectedWeights_sum (w : World) (sel : Nat → Bool) :
+    (selectedWeights w sel).sum =
+      sumN (fun p => if sel p then w.weight p else 0) w.parcels := by
+  unfold selectedWeights
+  rw [filter_map_sum_nat,sum_range_eq_sumN]
+
+theorem selectedWeight_carrier_le (w : World) (s : State) (t : Nat)
+    (sel : Nat → Bool)
+    (h : ∀ p, p < w.parcels → sel p = true → s.parcel p = .onTruck t) :
+    (selectedWeights w sel).sum ≤ load w s t := by
+  rw [selectedWeights_sum]
+  unfold load
+  apply sumN_mono
+  intro p hp
+  cases he : sel p with
+  | false => simp [he]
+  | true => simp [he,h p hp he]
+
+-- Mathematical witness: one bucket per real crossing truck. Empty
+-- buckets are permitted, since they still correspond to real crossings.
+def groupWeights (w : World) (key : Nat → Nat) :
+    List Nat → (Nat → Bool) → List (List Nat)
+  | [], _ => []
+  | t::ts, sel =>
+    selectedWeights w (fun p => sel p && (key p == t)) ::
+    groupWeights w key ts (fun p => sel p && !(key p == t))
+
+theorem groupWeights_length (w : World) (key : Nat → Nat)
+    (ts : List Nat) (sel : Nat → Bool) :
+    (groupWeights w key ts sel).length = ts.length := by
+  induction ts generalizing sel with
+  | nil => rfl
+  | cons t ts ih => simp [groupWeights,ih]
+
+theorem groupWeights_perm (w : World) (key : Nat → Nat)
+    (ts : List Nat) (sel : Nat → Bool)
+    (cover : ∀ p, p < w.parcels → sel p = true → key p ∈ ts) :
+    List.Perm (selectedWeights w sel) (groupWeights w key ts sel).flatten := by
+  induction ts generalizing sel with
+  | nil =>
+    have h : ∀ p, p < w.parcels → sel p = false := by
+      intro p hp
+      cases he : sel p with
+      | false => rfl
+      | true => have hh := cover p hp he; simp at hh
+    simp [groupWeights,selectedWeight_empty w sel h]
+  | cons t ts ih =>
+    let pred : Nat → Bool := fun p => key p == t
+    have cv : ∀ p, p < w.parcels →
+        (sel p && !pred p) = true → key p ∈ ts := by
+      intro p hp hh
+      have h : sel p = true ∧ key p ≠ t := by simpa [pred] using hh
+      have hm := cover p hp h.1
+      rcases List.mem_cons.mp hm with eq | mem
+      · exact False.elim (h.2 eq)
+      · exact mem
+    have hp := selectedWeight_split w sel pred
+    have ht := ih (fun p => sel p && !pred p) cv
+    have he := hp.trans (List.Perm.append (List.Perm.refl _) ht)
+    simpa [groupWeights,pred] using he
+
+theorem groupWeights_fit (w : World) (s : State) (C : Nat)
+    (key : Nat → Nat) (ts : List Nat) (sel : Nat → Bool)
+    (vl : ValidTruckLoad w s)
+    (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (valid : ∀ t ∈ ts, t < w.trucks)
+    (owner : ∀ p, p < w.parcels → sel p = true →
+      s.parcel p = .onTruck (key p)) :
+    ∀ g ∈ groupWeights w key ts sel, g.sum ≤ C := by
+  induction ts generalizing sel with
+  | nil => simp [groupWeights]
+  | cons t ts ih =>
+    intro g hg
+    simp only [groupWeights,List.mem_cons] at hg
+    rcases hg with eq | hg
+    · subst g
+      have h := selectedWeight_carrier_le w s t
+        (fun p => sel p && (key p == t)) (by
+          intro p hp he
+          have he' : sel p = true ∧ key p = t := by simpa using he
+          rw [← he'.2]
+          exact owner p hp he'.1)
+      have ht := valid t (by simp)
+      exact Nat.le_trans h (Nat.le_trans (vl t ht) (cap t ht))
+    · apply ih (fun p => sel p && !(key p == t))
+        (fun t ht => valid t (List.mem_cons_of_mem _ ht)) ?_ g hg
+      intro p hp h
+      have hs : sel p = true := (Bool.and_eq_true.mp h).1
+      exact owner p hp hs
+
+-- For an actual legal primitive, all selected parcels which cross a
+-- cut inward are partitioned into the trucks that really cross inward.
+theorem legal_step_crossing_groups (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (st : Step w s u m h)
+    (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (sel : Nat → Bool)
+    (moves : ∀ p, p < w.parcels → sel p = true →
+      side (physicalParcel s p) = false ∧ side (physicalParcel u p) = true) :
+    ∃ groups,
+      List.Perm (selectedWeights w sel) groups.flatten ∧
+      (∀ g ∈ groups, g.sum ≤ C) ∧
+      groups.length = (enteringTrucks w side s u).length := by
+  have owns : ∀ p, p < w.parcels → sel p = true →
+      sourceOwner s p ∈ enteringTrucks w side s u ∧
+      s.parcel p = .onTruck (sourceOwner s p) := by
+    intro p hp hs
+    exact entering_parcel_owner w side st vp p hp (moves p hp hs).1 (moves p hp hs).2
+  refine ⟨groupWeights w (sourceOwner s) (enteringTrucks w side s u) sel, ?_, ?_, ?_⟩
+  · exact groupWeights_perm w _ _ _ (fun p hp hs => (owns p hp hs).1)
+  · exact groupWeights_fit w s C _ _ _ vl cap
+      (fun t ht => List.mem_range.mp (List.mem_filter.mp ht).1)
+      (fun p hp hs => (owns p hp hs).2)
+  · exact groupWeights_length w _ _ _
+
+#print axioms groupWeights_perm
+#print axioms selectedWeight_carrier_le
+#print axioms legal_step_crossing_groups
+end IslandLogistics
