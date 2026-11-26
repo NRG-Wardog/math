@@ -4862,7 +4862,7 @@ theorem geo_charge_refinement (r : GeoSpec w) (a : ActionLabel)
   | board t f a => simp [mapLabel,geoAbstractCharge,geoActualCharge,flagCost,geoEnabled] at enabled ⊢; simp [enabled]
   | disembark t f => simp [mapLabel,geoAbstractCharge,geoActualCharge,flagCost,geoEnabled] at enabled ⊢; simp [enabled]
   | sail f b => simp [mapLabel,geoAbstractCharge,geoActualCharge,flagCost,geoEnabled] at enabled ⊢; simp [enabled]
-  | load p t a => rfl
+  | load p t a => exact Nat.le_refl _
   | unload p t a =>
     have hk : r.keepP p = true := enabled
     simp only [mapLabel,geoAbstractCharge,geoActualCharge,hk,Bool.true_and]
@@ -5033,7 +5033,7 @@ theorem geographic_portfolio_admissible (w : World) (sys : RoadCutSystem w)
       (sys.cuts.map (fun side => independentCutCost w side s C seed)).sum ≤ m+h := by
   obtain ⟨tr⟩ := trace_from_path w path
   have hb := geographic_trace_budget w sys gs disjoint tr vl vo vf vt
-  rw [sum_map_eq_zero gs _ (fun g _ => g.goal _ (geo_goal g.spec u done))] at hb
+  rw [sum_map_eq_zero gs (fun g => geoValue g u) (fun g _ => g.goal _ (geo_goal g.spec u done))] at hb
   have hc : (sys.cuts.map (fun side => independentCutCost w side s C seed)).sum ≤
       (sys.cuts.map (fun side => traceIn w side tr + traceOut w side tr)).sum := by
     apply sum_map_le
