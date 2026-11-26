@@ -695,3 +695,120 @@ theorem transfer_witness_combine (handling0 movement routeCost extraCost
 #print axioms residual_goal_budget
 #print axioms transfer_witness_combine
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+/- A counterexample to the stronger contract quantifying over all
+   well-formed configurations, including ones unreachable from INIT.
+   This is NOT a counterexample over the reachable-state space. -/
+def disconnectedWorld : World where
+  locations := 5
+  trucks := 2
+  ferries := 0
+  parcels := 1
+  road a b := a < 4 ∧ b < 4 ∧ (a + 1 = b ∨ b + 1 = a)
+  route _ _ := False
+  capacity _ := 1
+  slots _ := 0
+  weight _ := 1
+  goal _ := 2
+
+def disconnectedInit : State :=
+  ⟨fun t => .land (if t = 0 then 3 else 4), fun _ => 0, fun _ => .ground 3⟩
+
+def disconnectedBad : State :=
+  ⟨fun _ => .land 3, fun _ => 0, fun _ => .ground 3⟩
+
+def disconnectedLoaded : State :=
+  {disconnectedBad with parcel := setAt disconnectedBad.parcel 0 (.onTruck 0)}
+
+def disconnectedDriven : State :=
+  {disconnectedLoaded with truck := setAt disconnectedLoaded.truck 0 (.land 2)}
+
+def disconnectedDone : State :=
+  {disconnectedDriven with parcel := setAt disconnectedDriven.parcel 0 (.ground 2)}
+
+theorem disconnected_three_cost :
+    Path (Step disconnectedWorld) disconnectedBad disconnectedDone 1 2 := by
+  have e1 : Step disconnectedWorld disconnectedBad disconnectedLoaded 0 1 :=
+    Step.load disconnectedBad 0 0 3 rfl rfl (by decide) (by decide)
+  have e2 : Step disconnectedWorld disconnectedLoaded disconnectedDriven 1 0 :=
+    Step.drive disconnectedLoaded 0 3 2 rfl (by decide) (by decide)
+  have e3 : Step disconnectedWorld disconnectedDriven disconnectedDone 0 1 :=
+    Step.unload disconnectedDriven 0 0 2 rfl rfl (by decide)
+  exact Path.cons e1 (Path.cons e2 (Path.cons e3 (Path.nil _)))
+
+theorem disconnected_done_goal : Goal disconnectedWorld disconnectedDone := by
+  intro p hp
+  have hz : p = 0 := by change p < 1 at hp; omega
+  subst p
+  rfl
+
+theorem isolated_truck_step {s u : State} {m h : Nat}
+    (st : Step disconnectedWorld s u m h)
+    (initial : s.truck 1 = .land 4) : u.truck 1 = .land 4 := by
+  cases st with
+  | drive t a b ht hr valid =>
+    by_cases ht1 : t = 1
+    · subst t
+      have ha : a = 4 := TruckPosition.land.inj (ht.symm.trans initial)
+      subst a
+      change 4 < 4 ∧ b < 4 ∧ (4 + 1 = b ∨ b + 1 = 4) at hr
+      omega
+    · change setAt s.truck t (.land b) 1 = .land 4
+      simp [setAt, Ne.symm ht1, initial]
+  | board t f a ht hf hr room valid =>
+    change t < 2 ∧ f < 0 ∧ a < 5 at valid
+    omega
+  | disembark t f ht valid =>
+    change t < 2 ∧ f < 0 at valid
+    omega
+  | sail f b hr hne valid =>
+    change f < 0 ∧ b < 5 at valid
+    omega
+  | load p t a hp ht room valid => exact initial
+  | unload p t a hp ht valid => exact initial
+
+theorem isolated_truck_path {s u : State} {m h : Nat}
+    (p : Path (Step disconnectedWorld) s u m h) :
+    s.truck 1 = .land 4 → u.truck 1 = .land 4 := by
+  induction p with
+  | nil s => exact fun h => h
+  | cons st rest ih =>
+    intro hs
+    exact ih (isolated_truck_step st hs)
+
+theorem disconnected_bad_unreachable (m h : Nat) :
+    ¬ Path (Step disconnectedWorld) disconnectedInit disconnectedBad m h := by
+  intro p
+  have h := isolated_truck_path p (by rfl)
+  change TruckPosition.land 3 = TruckPosition.land 4 at h
+  cases h
+
+-- The three road-profile expressions used by the Python cut DP in
+-- this example, with initial component budget 1 but current stock 2.
+-- This theorem verifies their arithmetic, not Python refinement.
+def disconnectedProfile (I O finish : Int) : Int :=
+  max (2 * I - (finish - 2)) (2 * O + (finish - 2))
+
+theorem disconnected_phantom_crossings (f1 f2 f3 : Int)
+    (h1 : f1 ≤ 1) (h2 : f2 ≤ 1) (h3 : f3 ≤ 1) :
+    3 ≤ disconnectedProfile 0 0 f1 +
+      disconnectedProfile 0 0 f2 + disconnectedProfile 0 1 f3 := by
+  unfold disconnectedProfile
+  have a := le_max_left (2 * (0 : Int) - (f1 - 2)) (2 * (0 : Int) + (f1 - 2))
+  have b := le_max_left (2 * (0 : Int) - (f2 - 2)) (2 * (0 : Int) + (f2 - 2))
+  have c := le_max_left (2 * (0 : Int) - (f3 - 2)) (2 * (1 : Int) + (f3 - 2))
+  omega
+
+theorem disconnected_phantom_exact :
+    disconnectedProfile 0 0 1 + disconnectedProfile 0 0 1 +
+      disconnectedProfile 0 1 1 = 3 := by decide
+
+#print axioms disconnected_three_cost
+#print axioms disconnected_done_goal
+#print axioms disconnected_bad_unreachable
+#print axioms disconnected_phantom_crossings
+#print axioms disconnected_phantom_exact
+end IslandLogistics
