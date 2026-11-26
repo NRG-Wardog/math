@@ -5365,8 +5365,7 @@ theorem ground_step_flux_label (w : World) (island : Nat → Nat)
       rw [sumN_congr _ (fun _ => 0) _ (by
         intro q hq
         rw [← hs q hq]
-        change (if !groundIslandSide island i (truckVertex s q) && groundIslandSide island i (truckVertex s q) then 1 else 0) = 0
-      cases groundIslandSide island i (truckVertex s q) <;> rfl),sumN_zero]
+        cases groundIslandSide island i (truckVertex s q) <;> rfl),sumN_zero]
   | board t f a ht hf hr room valid =>
     constructor
     · rw [sumN_single _ _ t valid.1 (by
@@ -5397,8 +5396,7 @@ theorem ground_step_flux_label (w : World) (island : Nat → Nat)
       rw [sumN_congr _ (fun _ => 0) _ (by
         intro q hq
         rw [← hs q hq]
-        change (if !groundIslandSide island i (truckVertex s q) && groundIslandSide island i (truckVertex s q) then 1 else 0) = 0
-      cases groundIslandSide island i (truckVertex s q) <;> rfl),sumN_zero]
+        cases groundIslandSide island i (truckVertex s q) <;> rfl),sumN_zero]
   | load p t a hp ht room valid =>
     have hs : ∀ q, truckVertex {s with parcel := setAt s.parcel p (.onTruck t)} q = truckVertex s q := by
       intro q; cases he : s.truck q <;> simp [truckVertex,he]
