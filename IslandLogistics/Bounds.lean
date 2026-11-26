@@ -7236,3 +7236,304 @@ theorem paired_road_projection_admissible (w : World)
 #print axioms projection_trace_budget
 #print axioms paired_road_projection_admissible
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- PassengerCycles: counting MULTIPLE passenger rides, not merely
+-- distinct graph arcs.  Exactly m rides leaves no spare arc or vertex.
+theorem ride_cover_perm_tail (xs ys : List Nat) (nd : xs.Nodup)
+    (cover : ∀ a ∈ xs, a ∈ ys) : ∃ rest, List.Perm ys (xs++rest) := by
+  induction xs generalizing ys with
+  | nil => exact ⟨ys,List.Perm.refl _⟩
+  | cons x xs ih =>
+    have hn := List.nodup_cons.mp nd
+    have hx := cover x (by simp)
+    have cv : ∀ a ∈ xs, a ∈ ys.erase x := by
+      intro a ha
+      have ne : a ≠ x := by
+        intro eq
+        subst a
+        exact hn.1 ha
+      apply List.count_pos_iff.mp
+      rw [List.count_erase_of_ne ne]
+      exact List.count_pos_iff.mpr (cover a (List.mem_cons_of_mem _ ha))
+    obtain ⟨rest,perm⟩ := ih (ys.erase x) hn.2 cv
+    exact ⟨rest,(List.perm_cons_erase hx).trans (List.Perm.cons x perm)⟩
+
+theorem ride_cover_length (xs ys : List Nat) (nd : xs.Nodup)
+    (cover : ∀ a ∈ xs, a ∈ ys) : xs.length ≤ ys.length := by
+  obtain ⟨rest,perm⟩ := ride_cover_perm_tail xs ys nd cover
+  have h := perm.length_eq
+  simp at h
+  omega
+
+theorem ride_cover_equal_perm (xs ys : List Nat) (nd : xs.Nodup)
+    (cover : ∀ a ∈ xs, a ∈ ys) (len : xs.length = ys.length) :
+    List.Perm ys xs := by
+  obtain ⟨rest,perm⟩ := ride_cover_perm_tail xs ys nd cover
+  have h := perm.length_eq
+  simp at h
+  have hz : rest.length = 0 := by omega
+  have he : rest = [] := by simpa using hz
+  simpa [he] using perm
+
+inductive PassengerWalk (edges : List (Nat × Nat)) : Nat → Nat → List (Nat × Nat) → Prop where
+  | nil (v : Nat) : PassengerWalk edges v v []
+  | cons {a b c : Nat} {tail : List (Nat × Nat)} :
+      (a,b) ∈ edges → PassengerWalk edges b c tail →
+      PassengerWalk edges a c ((a,b)::tail)
+
+theorem passenger_walk_source (edges : List (Nat × Nat))
+    {a b : Nat} {path : List (Nat × Nat)} (walk : PassengerWalk edges a b path)
+    (ne : a ≠ b) : a ∈ edges.map Prod.fst := by
+  cases walk with
+  | nil => exact False.elim (ne rfl)
+  | cons edge tail => exact List.mem_map.mpr ⟨_,edge,rfl⟩
+
+theorem passenger_walk_target (edges : List (Nat × Nat))
+    {a b : Nat} {path : List (Nat × Nat)} (walk : PassengerWalk edges a b path)
+    (ne : a ≠ b) : b ∈ edges.map Prod.snd := by
+  induction walk with
+  | nil => exact False.elim (ne rfl)
+  | @cons a b c tail edge walk ih =>
+    by_cases e : b = c
+    · subst c
+      exact List.mem_map.mpr ⟨_,edge,rfl⟩
+    · exact ih e
+
+theorem passenger_other_vertex (vs : List Nat) (nd : vs.Nodup)
+    (size : 2 ≤ vs.length) (a : Nat) : ∃ b ∈ vs, b ≠ a := by
+  cases vs with
+  | nil => simp at size
+  | cons x xs =>
+    cases xs with
+    | nil => simp at size
+    | cons y ys =>
+      by_cases he : x = a
+      · have hn : x ∉ y::ys := (List.nodup_cons.mp nd).1
+        have hne : y ≠ a := by
+          intro eq
+          exact hn (by simp [he,eq])
+        exact ⟨y,by simp,hne⟩
+      · exact ⟨x,by simp,he⟩
+
+def PassengerStrong (vs : List Nat) (edges : List (Nat × Nat)) : Prop :=
+  ∀ a ∈ vs, ∀ b ∈ vs, ∃ path, PassengerWalk edges a b path
+
+theorem passenger_edge_coverage (vs : List Nat) (edges : List (Nat × Nat))
+    (nd : vs.Nodup) (size : 2 ≤ vs.length) (strong : PassengerStrong vs edges) :
+    (∀ a ∈ vs, a ∈ edges.map Prod.fst) ∧ (∀ a ∈ vs, a ∈ edges.map Prod.snd) := by
+  constructor
+  · intro a ha
+    obtain ⟨b,hb,ne⟩ := passenger_other_vertex vs nd size a
+    obtain ⟨p,hp⟩ := strong a ha b hb
+    exact passenger_walk_source edges hp (Ne.symm ne)
+  · intro a ha
+    obtain ⟨b,hb,ne⟩ := passenger_other_vertex vs nd size a
+    obtain ⟨p,hp⟩ := strong b hb a ha
+    exact passenger_walk_target edges hp ne
+
+theorem passenger_count_lower (vs : List Nat) (edges : List (Nat × Nat))
+    (nd : vs.Nodup) (size : 2 ≤ vs.length) (strong : PassengerStrong vs edges) :
+    vs.length ≤ edges.length := by
+  have h := ride_cover_length vs (edges.map Prod.fst) nd
+    (passenger_edge_coverage vs edges nd size strong).1
+  simpa using h
+
+theorem passenger_map_unique {α β : Type} (f : α → β) (xs : List α)
+    (nd : (xs.map f).Nodup) (a b : α) (ha : a ∈ xs) (hb : b ∈ xs)
+    (eq : f a = f b) : a = b := by
+  induction xs with
+  | nil => simp at ha
+  | cons x xs ih =>
+    have hn : f x ∉ xs.map f ∧ (xs.map f).Nodup := by simpa using nd
+    rcases List.mem_cons.mp ha with he | ha
+    · subst a
+      rcases List.mem_cons.mp hb with he | hb
+      · exact he.symm
+      · exact False.elim (hn.1 (List.mem_map.mpr ⟨b,hb,eq.symm⟩))
+    · rcases List.mem_cons.mp hb with he | hb
+      · subst b
+        exact False.elim (hn.1 (List.mem_map.mpr ⟨a,ha,eq⟩))
+      · exact ih hn.2 ha hb
+
+-- The orbit calculation is deterministic, not an enumeration test.
+def rideIter (next : Nat → Nat) : Nat → Nat → Nat
+  | 0, a => a
+  | n+1, a => rideIter next n (next a)
+
+theorem ride_iter_succ (next : Nat → Nat) (n a : Nat) :
+    rideIter next (n+1) a = next (rideIter next n a) := by
+  induction n generalizing a with
+  | zero => rfl
+  | succ n ih =>
+    change rideIter next (n+1) (next a) = next (rideIter next n (next a))
+    exact ih _
+
+theorem ride_iter_closed (next : Nat → Nat) (vs : List Nat)
+    (closed : ∀ a ∈ vs, next a ∈ vs) (n a : Nat) (ha : a ∈ vs) :
+    rideIter next n a ∈ vs := by
+  induction n with
+  | zero => exact ha
+  | succ n ih => rw [ride_iter_succ]; exact closed _ ih
+
+theorem ride_iter_cancel (next : Nat → Nat) (vs : List Nat)
+    (closed : ∀ a ∈ vs, next a ∈ vs)
+    (inj : ∀ a ∈ vs, ∀ b ∈ vs, next a = next b → a = b)
+    (a : Nat) (ha : a ∈ vs) (i j : Nat) (ij : i ≤ j)
+    (eq : rideIter next i a = rideIter next j a) :
+    rideIter next (j-i) a = a := by
+  induction i generalizing j with
+  | zero => simpa [rideIter] using eq.symm
+  | succ i ih =>
+    cases j with
+    | zero => omega
+    | succ j =>
+      rw [ride_iter_succ,ride_iter_succ] at eq
+      have h := inj _ (ride_iter_closed next vs closed i a ha)
+        _ (ride_iter_closed next vs closed j a ha) eq
+      have e := ih j (by omega) h
+      simpa using e
+
+theorem passenger_walk_iter (edges : List (Nat × Nat)) (next : Nat → Nat)
+    (unique : ∀ a b, (a,b) ∈ edges → next a = b)
+    {a b : Nat} {path : List (Nat × Nat)} (walk : PassengerWalk edges a b path) :
+    rideIter next path.length a = b := by
+  induction walk with
+  | nil a => rfl
+  | @cons a b c tail edge walk ih =>
+    simp only [List.length_cons,rideIter,unique a b edge]
+    exact ih
+
+theorem ride_period_reduce (next : Nat → Nat) (a k : Nat) (hk : 0 < k)
+    (period : rideIter next k a = a) (n : Nat) :
+    ∃ j, j < k ∧ rideIter next n a = rideIter next j a := by
+  induction n with
+  | zero => exact ⟨0,hk,rfl⟩
+  | succ n ih =>
+    obtain ⟨j,hj,he⟩ := ih
+    rw [ride_iter_succ,he,← ride_iter_succ]
+    by_cases eq : j+1 = k
+    · rw [eq,period]
+      exact ⟨0,hk,rfl⟩
+    · exact ⟨j+1,by omega,rfl⟩
+
+def rideOrbit (next : Nat → Nat) (a n : Nat) : List Nat :=
+  (List.range n).map (fun i => rideIter next i a)
+
+theorem ride_orbit_mem (next : Nat → Nat) (a n b : Nat) :
+    b ∈ rideOrbit next a n ↔ ∃ i, i < n ∧ rideIter next i a = b := by
+  simp [rideOrbit,List.mem_map]
+
+theorem ride_period_length (next : Nat → Nat) (vs : List Nat) (nd : vs.Nodup)
+    (a : Nat) (reach : ∀ b ∈ vs, ∃ n, rideIter next n a = b)
+    (k : Nat) (hk : 0 < k) (period : rideIter next k a = a) :
+    vs.length ≤ k := by
+  have cover : ∀ b ∈ vs, b ∈ rideOrbit next a k := by
+    intro b hb
+    obtain ⟨n,he⟩ := reach b hb
+    obtain ⟨j,hj,eq⟩ := ride_period_reduce next a k hk period n
+    exact (ride_orbit_mem next a k b).mpr ⟨j,hj,eq.symm.trans he⟩
+  have h := ride_cover_length vs (rideOrbit next a k) nd cover
+  simpa [rideOrbit] using h
+
+theorem ride_orbit_distinct (next : Nat → Nat) (a n : Nat)
+    (distinct : ∀ i j, i < j → j < n → rideIter next i a ≠ rideIter next j a) :
+    (rideOrbit next a n).Nodup := by
+  induction n with
+  | zero => simp [rideOrbit]
+  | succ n ih =>
+    unfold rideOrbit at *
+    rw [List.range_succ,List.map_append]
+    change ((List.map (fun i => rideIter next i a) (List.range n)) ++
+      [rideIter next n a]).Pairwise (fun x y => x ≠ y)
+    rw [List.pairwise_append]
+    refine ⟨ih (fun i j hij hj => distinct i j hij (by omega)),by simp,?_⟩
+    intro x hx y hy
+    obtain ⟨i,hi,rfl⟩ := List.mem_map.mp hx
+    have he : y = rideIter next n a := by simpa using hy
+    subst y
+    exact distinct i n (List.mem_range.mp hi) (by omega)
+
+-- A connected permutation on m vertices has exactly one orbit of
+-- length m.  This is the Hamiltonian cycle that the Python code tests.
+theorem passenger_orbit_cycle (next : Nat → Nat) (vs : List Nat) (nd : vs.Nodup)
+    (closed : ∀ a ∈ vs, next a ∈ vs)
+    (inj : ∀ a ∈ vs, ∀ b ∈ vs, next a = next b → a = b)
+    (a : Nat) (ha : a ∈ vs)
+    (reach : ∀ b ∈ vs, ∃ n, rideIter next n a = b) :
+    List.Perm (rideOrbit next a vs.length) vs ∧ rideIter next vs.length a = a := by
+  have distinct : ∀ i j, i < j → j < vs.length →
+      rideIter next i a ≠ rideIter next j a := by
+    intro i j hij hj he
+    have period := ride_iter_cancel next vs closed inj a ha i j (by omega) he
+    have hk := ride_period_length next vs nd a reach (j-i) (by omega) period
+    omega
+  have hnd := ride_orbit_distinct next a vs.length distinct
+  have cv : ∀ b ∈ rideOrbit next a vs.length, b ∈ vs := by
+    intro b hb
+    obtain ⟨i,hi,he⟩ := (ride_orbit_mem next a vs.length b).mp hb
+    rw [← he]
+    exact ride_iter_closed next vs closed i a ha
+  have perm : List.Perm (rideOrbit next a vs.length) vs :=
+    (ride_cover_equal_perm _ _ hnd cv (by simp [rideOrbit])).symm
+  constructor
+  · exact perm
+  · have he := ride_iter_closed next vs closed vs.length a ha
+    have hm := perm.mem_iff.mpr he
+    obtain ⟨i,hi,eq⟩ := (ride_orbit_mem next a vs.length _).mp hm
+    have period := ride_iter_cancel next vs closed inj a ha i vs.length (by omega) eq
+    have hk := ride_period_length next vs nd a reach (vs.length-i) (by omega) period
+    have hz : i = 0 := by omega
+    subst i
+    simpa [rideIter] using eq.symm
+
+theorem passenger_exact_cycle (vs : List Nat) (edges : List (Nat × Nat))
+    (nd : vs.Nodup) (size : 2 ≤ vs.length) (strong : PassengerStrong vs edges)
+    (count : edges.length = vs.length) (root : Nat) (hr : root ∈ vs) :
+    ∃ next : Nat → Nat,
+      (∀ a b, (a,b) ∈ edges → next a = b) ∧
+      (∀ a ∈ vs, (a,next a) ∈ edges) ∧
+      List.Perm (rideOrbit next root vs.length) vs ∧
+      rideIter next vs.length root = root := by
+  classical
+  have cover := passenger_edge_coverage vs edges nd size strong
+  have ps : List.Perm (edges.map Prod.fst) vs :=
+    ride_cover_equal_perm vs _ nd cover.1 (by simp [count])
+  have pt : List.Perm (edges.map Prod.snd) vs :=
+    ride_cover_equal_perm vs _ nd cover.2 (by simp [count])
+  have source : ∀ a ∈ vs, ∃ b, (a,b) ∈ edges := by
+    intro a ha
+    obtain ⟨p,hp,eq⟩ := List.mem_map.mp (cover.1 a ha)
+    exact ⟨p.2,by simpa [← eq] using hp⟩
+  let next : Nat → Nat := fun a =>
+    if ha : a ∈ vs then Classical.choose (source a ha) else a
+  have real : ∀ a ∈ vs, (a,next a) ∈ edges := by
+    intro a ha
+    simp [next,ha,Classical.choose_spec (source a ha)]
+  have unique : ∀ a b, (a,b) ∈ edges → next a = b := by
+    intro a b he
+    have hm : a ∈ vs := ps.mem_iff.mp (List.mem_map.mpr ⟨(a,b),he,rfl⟩)
+    have eq := passenger_map_unique Prod.fst edges (ps.nodup_iff.mpr nd)
+      (a,next a) (a,b) (real a hm) he rfl
+    exact congrArg Prod.snd eq
+  have closed : ∀ a ∈ vs, next a ∈ vs := by
+    intro a ha
+    exact pt.mem_iff.mp (List.mem_map.mpr ⟨(a,next a),real a ha,rfl⟩)
+  have inj : ∀ a ∈ vs, ∀ b ∈ vs, next a = next b → a = b := by
+    intro a ha b hb eq
+    have he := passenger_map_unique Prod.snd edges (pt.nodup_iff.mpr nd)
+      (a,next a) (b,next b) (real a ha) (real b hb) eq
+    exact congrArg Prod.fst he
+  have reach : ∀ b ∈ vs, ∃ n, rideIter next n root = b := by
+    intro b hb
+    obtain ⟨path,walk⟩ := strong root hr b hb
+    exact ⟨path.length,passenger_walk_iter edges next unique walk⟩
+  obtain ⟨perm,period⟩ := passenger_orbit_cycle next vs nd closed inj root hr reach
+  exact ⟨next,unique,real,perm,period⟩
+
+#print axioms passenger_count_lower
+#print axioms passenger_orbit_cycle
+#print axioms passenger_exact_cycle
+end IslandLogistics
