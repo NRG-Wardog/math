@@ -4085,3 +4085,368 @@ theorem compressed_full_mask_bound (w : World) (u : State)
 #print axioms compressed_forest_actual_bound
 #print axioms compressed_full_mask_bound
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+theorem sumN_mul_left (k : Nat) (f : Nat → Nat) (n : Nat) :
+    sumN (fun p => k * f p) n = k * sumN f n := by
+  induction n with
+  | zero => simp [sumN]
+  | succ n ih => simp [sumN,ih,Nat.mul_add]
+
+theorem sumN_mul_right (k : Nat) (f : Nat → Nat) (n : Nat) :
+    sumN (fun p => f p * k) n = sumN f n * k := by
+  induction n with
+  | zero => simp [sumN]
+  | succ n ih => simp [sumN,ih,Nat.add_mul]
+
+theorem sumN_swap (f : Nat → Nat → Nat) (n m : Nat) :
+    sumN (fun p => sumN (f p) m) n =
+      sumN (fun q => sumN (fun p => f p q) n) m := by
+  induction n with
+  | zero => simp [sumN,sumN_zero]
+  | succ n ih =>
+    simp only [sumN,ih]
+    rw [sumN_add]
+
+def massLoad (w : World) (mass : Nat → Nat) (s : State) (t : Nat) : Nat :=
+  sumN (fun p => if s.parcel p = .onTruck t then mass p else 0) w.parcels
+
+def massFerry (w : World) (mass : Nat → Nat) (s : State) (f : Nat) : Nat :=
+  sumN (fun p => if (match s.parcel p with
+    | .ground _ => false
+    | .onTruck t => s.truck t == .onFerry f) then mass p else 0) w.parcels
+
+def ValidFerryOccupancy (w : World) (s : State) : Prop :=
+  ∀ f, f < w.ferries → occupancy w s f ≤ w.slots f
+
+theorem occupancy_after_board (w : World) (s : State) (t f a : Nat)
+    (ht : t < w.trucks) (hg : s.truck t = .land a) :
+    occupancy w {s with truck := setAt s.truck t (.onFerry f)} f = occupancy w s f+1 := by
+  unfold occupancy
+  apply sumN_one_delta _ _ t _ _ ht
+  · intro q hq; simp [setAt,hq]
+  · simp [setAt,hg]
+
+theorem occupancy_after_disembark (w : World) (s : State) (t f : Nat)
+    (ht : t < w.trucks) (hg : s.truck t = .onFerry f) :
+    occupancy w s f =
+      occupancy w {s with truck := setAt s.truck t (.land (s.ferry f))} f+1 := by
+  unfold occupancy
+  apply sumN_one_delta _ _ t _ _ ht
+  · intro q hq; simp [setAt,hq]
+  · simp [setAt,hg]
+
+theorem step_valid_occupancy (w : World) {s u : State} {m h : Nat}
+    (st : Step w s u m h) (valid : ValidFerryOccupancy w s) :
+    ValidFerryOccupancy w u := by
+  cases st with
+  | drive t a b ht hr v =>
+    intro f hf
+    have he : occupancy w {s with truck := setAt s.truck t (.land b)} f = occupancy w s f := by
+      unfold occupancy
+      apply sumN_congr
+      intro q hq
+      by_cases eq : q = t
+      · subst q; simp [setAt,ht]
+      · simp [setAt,eq]
+    rw [he]
+    exact valid f hf
+  | board t f a ht hf hr room v =>
+    intro g hg
+    by_cases eq : g = f
+    · subst g
+      rw [occupancy_after_board w s t f a v.1 ht]
+      omega
+    · have he : occupancy w {s with truck := setAt s.truck t (.onFerry f)} g = occupancy w s g := by
+        unfold occupancy
+        apply sumN_congr
+        intro q hq
+        by_cases eq' : q = t
+        · subst q; simp [setAt,ht,Ne.symm eq]
+        · simp [setAt,eq']
+      rw [he]
+      exact valid g hg
+  | disembark t f ht v =>
+    intro g hg
+    by_cases eq : g = f
+    · subst g
+      have he := occupancy_after_disembark w s t f v.1 ht
+      have hv := valid f hg
+      omega
+    · have he : occupancy w {s with truck := setAt s.truck t (.land (s.ferry f))} g = occupancy w s g := by
+        unfold occupancy
+        apply sumN_congr
+        intro q hq
+        by_cases eq' : q = t
+        · subst q; simp [setAt,ht,Ne.symm eq]
+        · simp [setAt,eq']
+      rw [he]
+      exact valid g hg
+  | sail f b hr hne v => exact valid
+  | load p t a hp ht room v => exact valid
+  | unload p t a hp ht v => exact valid
+
+theorem path_valid_occupancy (w : World) {s u : State} {m h : Nat}
+    (p : Path (Step w) s u m h) (valid : ValidFerryOccupancy w s) :
+    ValidFerryOccupancy w u := by
+  induction p with
+  | nil s => exact valid
+  | cons st tail ih => exact ih (step_valid_occupancy w st valid)
+
+-- The ferry payload equals the sum of the masses of its actual
+-- passengers, even if several trucks carry packages of the same weight.
+theorem massFerry_partition (w : World) (mass : Nat → Nat) (s : State)
+    (vp : ValidParcelCarriers w s) (f : Nat) :
+    massFerry w mass s f =
+      sumN (fun t => if s.truck t = .onFerry f then massLoad w mass s t else 0) w.trucks := by
+  unfold massFerry massLoad
+  have eq : sumN (fun t => if s.truck t = .onFerry f then
+      sumN (fun p => if s.parcel p = .onTruck t then mass p else 0) w.parcels else 0) w.trucks =
+      sumN (fun t => sumN (fun p => if s.truck t = .onFerry f ∧ s.parcel p = .onTruck t
+        then mass p else 0) w.parcels) w.trucks := by
+    apply sumN_congr
+    intro t ht
+    by_cases he : s.truck t = .onFerry f
+    · simp [he]
+    · simp [he,sumN_zero]
+  rw [eq,sumN_swap]
+  apply sumN_congr
+  intro p hp
+  cases he : s.parcel p with
+  | ground a => simp [he,sumN_zero]
+  | onTruck t =>
+    have ht := vp p hp t he
+    have single := sumN_single
+      (fun q => if s.truck q = .onFerry f ∧ s.parcel p = .onTruck q then mass p else 0)
+      w.trucks t ht (by intro q hq hn; simp [he,Ne.symm hn])
+    rw [single]
+    simp [he]
+
+structure MassRule (w : World) (mass : Nat → Nat) (limit : Nat) : Prop where
+  unit : Nat
+  positive : 0 < unit
+  item : ∀ p, p < w.parcels → unit * mass p ≤ w.weight p
+  capacity : ∀ t, t < w.trucks → w.capacity t < unit*(limit+1)
+
+theorem massLoad_rule (w : World) (mass : Nat → Nat) (limit : Nat)
+    (rule : MassRule w mass limit) (s : State) (vl : ValidTruckLoad w s)
+    (t : Nat) (ht : t < w.trucks) : massLoad w mass s t ≤ limit := by
+  have h : rule.unit * massLoad w mass s t ≤ load w s t := by
+    unfold massLoad load
+    rw [← sumN_mul_left]
+    apply sumN_mono
+    intro p hp
+    by_cases he : s.parcel p = .onTruck t
+    · simpa [he] using rule.item p hp
+    · simp [he]
+  have hu := Nat.le_trans h (vl t ht)
+  have hb := Nat.lt_of_le_of_lt hu (rule.capacity t ht)
+  by_cases he : massLoad w mass s t ≤ limit
+  · exact he
+  · have hm := Nat.mul_le_mul_left rule.unit (show limit+1 ≤ massLoad w mass s t by omega)
+    omega
+
+theorem massFerry_rule (w : World) (mass : Nat → Nat) (limit : Nat)
+    (rule : MassRule w mass limit) (s : State) (vl : ValidTruckLoad w s)
+    (vp : ValidParcelCarriers w s) (vo : ValidFerryOccupancy w s)
+    (f : Nat) (hf : f < w.ferries) :
+    massFerry w mass s f ≤ limit * w.slots f := by
+  rw [massFerry_partition w mass s vp f]
+  have h : sumN (fun t => if s.truck t = .onFerry f then massLoad w mass s t else 0) w.trucks ≤
+      sumN (fun t => limit * (if s.truck t = .onFerry f then 1 else 0)) w.trucks := by
+    apply sumN_mono
+    intro t ht
+    by_cases he : s.truck t = .onFerry f
+    · simpa [he] using massLoad_rule w mass limit rule s vl t ht
+    · simp [he]
+  rw [sumN_mul_left] at h
+  exact Nat.le_trans h (Nat.mul_le_mul_left limit (vo f hf))
+
+structure WeightedLabels (w : World) where
+  label : Nat → Vertex → Nat
+  drivePrice : Nat
+  boardPrice : Nat
+  sailPrice : Nat → Nat
+  road : ∀ p a b, p < w.parcels → w.road a b →
+    label p (.ground a) ≤ drivePrice + label p (.ground b)
+  board : ∀ p f a, p < w.parcels → w.route f a →
+    label p (.ground a) ≤ boardPrice + label p (.aboard f a)
+  disembark : ∀ p f a, p < w.parcels → w.route f a →
+    label p (.aboard f a) ≤ boardPrice + label p (.ground a)
+  sail : ∀ p f a b, p < w.parcels → w.route f a → w.route f b →
+    label p (.aboard f a) ≤ sailPrice f + label p (.aboard f b)
+  goal : ∀ p, p < w.parcels → label p (.ground (w.goal p)) = 0
+
+def weightedValue (w : World) (mass : Nat → Nat) (l : WeightedLabels w) (s : State) :=
+  sumN (fun p => mass p * l.label p (parcelVertex s p)) w.parcels
+
+theorem weighted_value_le_charge (w : World) (mass : Nat → Nat)
+    (l : WeightedLabels w) (s u : State) (affected : Nat → Bool) (price : Nat)
+    (local : ∀ p, p < w.parcels →
+      l.label p (parcelVertex s p) ≤ (if affected p then price else 0) +
+        l.label p (parcelVertex u p)) :
+    weightedValue w mass l s ≤
+      sumN (fun p => if affected p then mass p else 0) w.parcels * price +
+        weightedValue w mass l u := by
+  unfold weightedValue
+  rw [← sumN_mul_right,← sumN_add]
+  apply sumN_mono
+  intro p hp
+  have h := Nat.mul_le_mul_left (mass p) (local p hp)
+  rw [Nat.mul_add] at h
+  cases he : affected p <;> simp [he] at h ⊢ <;> omega
+
+theorem weighted_unchanged (w : World) (mass : Nat → Nat) (l : WeightedLabels w)
+    (s u : State) (he : ∀ p, p < w.parcels → parcelVertex s p = parcelVertex u p) :
+    weightedValue w mass l s = weightedValue w mass l u := by
+  unfold weightedValue
+  exact sumN_congr _ _ _ (fun p hp => by rw [he p hp])
+
+-- The concrete primitive action spends at most its scaled movement
+-- budget, independently of handling and every other parcel's path.
+theorem weighted_step_budget (w : World) (mass : Nat → Nat) (limit scale : Nat)
+    (rule : MassRule w mass limit) (l : WeightedLabels w)
+    (hd : l.drivePrice ≤ scale) (hb : l.boardPrice ≤ scale)
+    (hs : ∀ f, f < w.ferries → w.slots f * l.sailPrice f ≤ 3*scale)
+    {s u : State} {m h : Nat} (st : Step w s u m h)
+    (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (vo : ValidFerryOccupancy w s) (vf : ValidFerries w s) :
+    weightedValue w mass l s ≤ limit*scale*m + weightedValue w mass l u := by
+  cases st with
+  | drive t a b ht hr valid =>
+    have h := weighted_value_le_charge w mass l s _
+      (fun p => decide (s.parcel p = .onTruck t)) l.drivePrice (by
+        intro p hp
+        cases he : s.parcel p with
+        | ground x => simp [parcelVertex,he]
+        | onTruck q =>
+          by_cases eq : q = t
+          · subst q; simpa [parcelVertex,truckVertex,he,ht,setAt] using l.road p a b hp hr
+          · simp [parcelVertex,truckVertex,he,setAt,eq])
+    change weightedValue w mass l s ≤ massLoad w mass s t*l.drivePrice +
+      weightedValue w mass l _ at h
+    have hm := massLoad_rule w mass limit rule s vl t valid.1
+    have hprod := Nat.mul_le_mul hm hd
+    simp only [Nat.mul_one]
+    omega
+  | board t f a ht hf hr room valid =>
+    have h := weighted_value_le_charge w mass l s _
+      (fun p => decide (s.parcel p = .onTruck t)) l.boardPrice (by
+        intro p hp
+        cases he : s.parcel p with
+        | ground x => simp [parcelVertex,he]
+        | onTruck q =>
+          by_cases eq : q = t
+          · subst q; simpa [parcelVertex,truckVertex,he,ht,hf,setAt] using l.board p f a hp hr
+          · simp [parcelVertex,truckVertex,he,setAt,eq])
+    change weightedValue w mass l s ≤ massLoad w mass s t*l.boardPrice +
+      weightedValue w mass l _ at h
+    have hm := massLoad_rule w mass limit rule s vl t valid.1
+    have hprod := Nat.mul_le_mul hm hb
+    simp only [Nat.mul_one]
+    omega
+  | disembark t f ht valid =>
+    have h := weighted_value_le_charge w mass l s _
+      (fun p => decide (s.parcel p = .onTruck t)) l.boardPrice (by
+        intro p hp
+        cases he : s.parcel p with
+        | ground x => simp [parcelVertex,he]
+        | onTruck q =>
+          by_cases eq : q = t
+          · subst q; simpa [parcelVertex,truckVertex,he,ht,setAt] using
+              l.disembark p f (s.ferry f) hp (vf f valid.2)
+          · simp [parcelVertex,truckVertex,he,setAt,eq])
+    change weightedValue w mass l s ≤ massLoad w mass s t*l.boardPrice +
+      weightedValue w mass l _ at h
+    have hm := massLoad_rule w mass limit rule s vl t valid.1
+    have hprod := Nat.mul_le_mul hm hb
+    simp only [Nat.mul_one]
+    omega
+  | sail f b hr hne valid =>
+    have h := weighted_value_le_charge w mass l s _
+      (fun p => match s.parcel p with | .ground _ => false | .onTruck t => s.truck t == .onFerry f)
+      (l.sailPrice f) (by
+        intro p hp
+        cases he : s.parcel p with
+        | ground x => simp [parcelVertex,he]
+        | onTruck t =>
+          cases ht : s.truck t with
+          | land x => simp [parcelVertex,truckVertex,he,ht]
+          | onFerry g =>
+            by_cases eq : g = f
+            · subst g; simpa [parcelVertex,truckVertex,he,ht,setAt] using
+                l.sail p f (s.ferry f) b hp (vf f valid.1) hr
+            · simp [parcelVertex,truckVertex,he,ht,setAt,eq])
+    change weightedValue w mass l s ≤ massFerry w mass s f*l.sailPrice f +
+      weightedValue w mass l _ at h
+    have hm := massFerry_rule w mass limit rule s vl vp vo f valid.1
+    have h1 := Nat.mul_le_mul_right (l.sailPrice f) hm
+    have h2 := Nat.mul_le_mul_left limit (hs f valid.1)
+    rw [Nat.mul_assoc] at h1
+    have he : limit*(3*scale) = limit*scale*3 := by
+      rw [Nat.mul_comm 3 scale,Nat.mul_assoc]
+    rw [he] at h2
+    omega
+  | load p t a hp ht room valid =>
+    have he := weighted_unchanged w mass l s _ (by
+      intro q hq
+      by_cases eq : q = p
+      · subst q; simp [parcelVertex,truckVertex,hp,ht,setAt]
+      · simp [parcelVertex,truckVertex,setAt,eq])
+    simp [he]
+  | unload p t a hp ht valid =>
+    have he := weighted_unchanged w mass l s _ (by
+      intro q hq
+      by_cases eq : q = p
+      · subst q; simp [parcelVertex,truckVertex,hp,ht,setAt]
+      · simp [parcelVertex,truckVertex,setAt,eq])
+    simp [he]
+
+theorem weighted_path_budget (w : World) (mass : Nat → Nat) (limit scale : Nat)
+    (rule : MassRule w mass limit) (l : WeightedLabels w)
+    (hd : l.drivePrice ≤ scale) (hb : l.boardPrice ≤ scale)
+    (hs : ∀ f, f < w.ferries → w.slots f * l.sailPrice f ≤ 3*scale)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h)
+    (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (vo : ValidFerryOccupancy w s) (vf : ValidFerries w s) :
+    weightedValue w mass l s ≤ limit*scale*m + weightedValue w mass l u := by
+  induction path with
+  | nil s => simp
+  | cons st tail ih =>
+    have h1 := weighted_step_budget w mass limit scale rule l hd hb hs st vl vp vo vf
+    have h2 := ih (step_valid_load w st vl) (step_valid_parcel_carriers w st vp)
+      (step_valid_occupancy w st vo) (step_valid_ferries w st vf)
+    rw [Nat.mul_add]
+    omega
+
+theorem weighted_goal (w : World) (mass : Nat → Nat) (l : WeightedLabels w)
+    (u : State) (done : Goal w u) : weightedValue w mass l u = 0 := by
+  unfold weightedValue
+  have he := sumN_congr (fun p => mass p*l.label p (parcelVertex u p))
+    (fun _ => 0) w.parcels (by intro p hp; simp [parcelVertex,done p hp,l.goal p hp])
+  rw [he,sumN_zero]
+
+theorem weighted_transport_admissible (w : World) (mass : Nat → Nat) (limit scale : Nat)
+    (rule : MassRule w mass limit) (l : WeightedLabels w) (den : 0 < limit*scale)
+    (hd : l.drivePrice ≤ scale) (hb : l.boardPrice ≤ scale)
+    (hs : ∀ f, f < w.ferries → w.slots f * l.sailPrice f ≤ 3*scale)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h) (done : Goal w u)
+    (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (vo : ValidFerryOccupancy w s) (vf : ValidFerries w s) :
+    handling w s + (weightedValue w mass l s + limit*scale-1)/(limit*scale) ≤ m+h := by
+  have h1 := weighted_path_budget w mass limit scale rule l hd hb hs path vl vp vo vf
+  rw [weighted_goal w mass l u done,Nat.add_zero] at h1
+  have h2 := ceil_lower (weightedValue w mass l s) (limit*scale) m den
+    (by rw [Nat.mul_comm]; exact h1)
+  have h3 := handling_path w path done
+  omega
+
+#print axioms path_valid_occupancy
+#print axioms massFerry_partition
+#print axioms massLoad_rule
+#print axioms massFerry_rule
+#print axioms weighted_step_budget
+#print axioms weighted_transport_admissible
+end IslandLogistics
