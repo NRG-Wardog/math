@@ -1051,7 +1051,7 @@ theorem minCandidate_le_member (fallback : Nat) (xs : List Nat) (x : Nat)
     rcases hx with h | h
     · subst y
       exact Nat.min_le_left _ _
-    · exact (Nat.min_le_right _ _).trans (ih h)
+    · exact Nat.le_trans (Nat.min_le_right _ _) (ih h)
 
 -- Source-level route/cut assignment composition. The witness is the
 -- particular retained-job assignment induced by a legal path. The
