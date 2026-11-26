@@ -7663,3 +7663,195 @@ theorem passenger_cycle_action_budget (L rides B D S slots aboard : Nat)
 #print axioms passenger_cycle_lower_admissible
 #print axioms passenger_cycle_action_budget
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- HubFlow: erase loops without introducing any edge that was not in
+-- the original parcel walk. Vertices are encoded by the initial
+-- vertex and the destinations of the edge list.
+def hubVertices (a : Nat) (path : List (Nat × Nat)) : List Nat :=
+  a :: path.map Prod.snd
+
+def HubSimplePath (edges : List (Nat × Nat)) (a b : Nat)
+    (path : List (Nat × Nat)) : Prop :=
+  PassengerWalk edges a b path ∧ (hubVertices a path).Nodup
+
+theorem hub_simple_suffix (edges : List (Nat × Nat))
+    {a b : Nat} {path : List (Nat × Nat)}
+    (walk : PassengerWalk edges a b path)
+    (simple : (hubVertices a path).Nodup)
+    (v : Nat) (hv : v ∈ hubVertices a path) :
+    ∃ suffix, HubSimplePath edges v b suffix ∧
+      ∀ e ∈ suffix, e ∈ path := by
+  induction walk with
+  | nil a =>
+    have he : v = a := by simpa [hubVertices] using hv
+    subst v
+    exact ⟨[],⟨PassengerWalk.nil a,by simp [hubVertices]⟩,by simp⟩
+  | @cons a z b tail edge walk ih =>
+    have he : hubVertices a ((a,z)::tail) = a :: hubVertices z tail := rfl
+    rw [he] at simple hv
+    rcases List.mem_cons.mp hv with eq | ht
+    · subst v
+      exact ⟨(a,z)::tail,⟨PassengerWalk.cons edge walk,by rw [he]; exact simple⟩,
+        fun e he => he⟩
+    · obtain ⟨suf,hs,sub⟩ := ih (List.nodup_cons.mp simple).2 ht
+      exact ⟨suf,hs,fun e he => List.mem_cons_of_mem _ (sub e he)⟩
+
+theorem hub_loop_erase (edges : List (Nat × Nat))
+    {a b : Nat} {path : List (Nat × Nat)}
+    (walk : PassengerWalk edges a b path) :
+    ∃ simple, HubSimplePath edges a b simple ∧
+      ∀ e ∈ simple, e ∈ path := by
+  induction walk with
+  | nil a => exact ⟨[],⟨PassengerWalk.nil a,by simp [hubVertices]⟩,by simp⟩
+  | @cons a z b tail edge walk ih =>
+    obtain ⟨q,⟨qwalk,qnd⟩,sub⟩ := ih
+    by_cases ha : a ∈ hubVertices z q
+    · obtain ⟨r,hr,rs⟩ := hub_simple_suffix edges qwalk qnd a ha
+      exact ⟨r,hr,fun e he => List.mem_cons_of_mem _ (sub e (rs e he))⟩
+    · refine ⟨(a,z)::q,⟨PassengerWalk.cons edge qwalk,?_⟩,?_⟩
+      · change (a::hubVertices z q).Nodup
+        exact List.nodup_cons.mpr ⟨ha,qnd⟩
+      · intro e he
+        rcases List.mem_cons.mp he with eq | ht
+        · exact List.mem_cons.mpr (Or.inl eq)
+        · exact List.mem_cons_of_mem _ (sub e ht)
+
+-- Complete choice enumeration (one simple path per parcel). The
+-- physical proof supplies a path in each listed option set.
+def hubChoices {α : Type} : List (List α) → List (List α)
+  | [] => [[]]
+  | xs::xss => xs.flatMap (fun x => (hubChoices xss).map (fun tail => x::tail))
+
+inductive HubChoiceWitness {α : Type} : List (List α) → List α → Prop where
+  | nil : HubChoiceWitness [] []
+  | cons {xs xss x tail} : x ∈ xs → HubChoiceWitness xss tail →
+      HubChoiceWitness (xs::xss) (x::tail)
+
+theorem hub_choices_complete {α : Type} {options : List (List α)} {choice : List α}
+    (witness : HubChoiceWitness options choice) : choice ∈ hubChoices options := by
+  induction witness with
+  | nil => simp [hubChoices]
+  | @cons xs xss x tail hm hw ih =>
+    unfold hubChoices
+    apply List.mem_flatMap.mpr
+    exact ⟨x,hm,List.mem_map.mpr ⟨tail,ih,rfl⟩⟩
+
+-- Per-port demand in HubFlow.cost is exactly the number of bins
+-- associated with the two orientations of a port-hub edge.
+structure HubPort where
+  outbound : Nat
+  inbound : Nat
+  stock : Nat
+
+def hubDep (k : Nat) (p : HubPort) : Nat := (p.outbound+k-1)/k
+def hubArr (k : Nat) (p : HubPort) : Nat := (p.inbound+k-1)/k
+
+def hubDepBound (k boats : Nat) (p : HubPort) : Nat :=
+  max (hubDep k p) (hubArr k p - (boats-p.stock))
+def hubArrBound (k : Nat) (p : HubPort) : Nat :=
+  max (hubArr k p) (hubDep k p - p.stock)
+
+structure HubPortTrace (p : HubPort) (k boats : Nat) where
+  depart : Nat
+  arrive : Nat
+  finish : Nat
+  tripsOut : Nat
+  tripsIn : Nat
+  binOut : p.outbound ≤ tripsOut
+  binIn : p.inbound ≤ tripsIn
+  sailOut : tripsOut ≤ depart*k
+  sailIn : tripsIn ≤ arrive*k
+  initialStock : p.stock ≤ boats
+  finalStock : finish ≤ boats
+  balance : depart+p.stock = arrive+finish
+
+theorem hub_port_inventory_bound (p : HubPort) (k boats : Nat)
+    (positive : 0 < k) (t : HubPortTrace p k boats) :
+    hubDepBound k boats p ≤ t.depart ∧ hubArrBound k p ≤ t.arrive := by
+  have hd := ceil_lower p.outbound k t.depart positive (Nat.le_trans t.binOut t.sailOut)
+  have ha := ceil_lower p.inbound k t.arrive positive (Nat.le_trans t.binIn t.sailIn)
+  have hbal := t.balance
+  have hi := t.initialStock
+  have hf := t.finalStock
+  unfold hubDepBound hubArrBound hubDep hubArr
+  omega
+
+def hubFleetCost (ports : List HubPort) (k boats aboard : Nat) : Nat :=
+  let sails := max ((ports.map (hubDepBound k boats)).sum)
+    ((ports.map (hubArrBound k)).sum)
+  let d := (ports.map HubPort.inbound).sum
+  let b := max ((ports.map HubPort.outbound).sum - aboard) (d-aboard)
+  3*sails+b+d
+
+-- All bounds refer to the same fleet and the same legal completion.
+-- Departure/arrival totals count sails, while trips count passengers.
+theorem hub_fleet_cost_bound (ports : List HubPort) (k boats aboard B D S : Nat)
+    (positive : 0 < k)
+    (depart arrive tripsOut tripsIn finish : HubPort → Nat)
+    (localTrace : ∀ p ∈ ports, HubPortTrace p k boats)
+    (realTrace : ∀ p (hp : p ∈ ports),
+      (localTrace p hp).depart = depart p ∧
+      (localTrace p hp).arrive = arrive p ∧
+      (localTrace p hp).tripsOut = tripsOut p ∧
+      (localTrace p hp).tripsIn = tripsIn p ∧
+      (localTrace p hp).finish = finish p)
+    (departTotal : (ports.map depart).sum ≤ S)
+    (arriveTotal : (ports.map arrive).sum ≤ S)
+    (outTotal : (ports.map tripsOut).sum ≤ B+aboard)
+    (inTotal : (ports.map tripsIn).sum ≤ D)
+    (serviceBalance : D ≤ B+aboard) :
+    hubFleetCost ports k boats aboard ≤ 3*S+B+D := by
+  have hd := sum_map_le ports (hubDepBound k boats) depart (by
+    intro p hp
+    have ht := (hub_port_inventory_bound p k boats positive (localTrace p hp)).1
+    rw [(realTrace p hp).1] at ht
+    exact ht)
+  have ha := sum_map_le ports (hubArrBound k) arrive (by
+    intro p hp
+    have ht := (hub_port_inventory_bound p k boats positive (localTrace p hp)).2
+    rw [(realTrace p hp).2.1] at ht
+    exact ht)
+  have ho := sum_map_le ports HubPort.outbound tripsOut (by
+    intro p hp
+    have ht := (localTrace p hp).binOut
+    rw [(realTrace p hp).2.2.1] at ht
+    exact ht)
+  have hi := sum_map_le ports HubPort.inbound tripsIn (by
+    intro p hp
+    have ht := (localTrace p hp).binIn
+    rw [(realTrace p hp).2.2.2.1] at ht
+    exact ht)
+  unfold hubFleetCost
+  dsimp
+  omega
+
+-- Each feasible manifest grouping is induced by individual real
+-- traversals of a directed road edge or of a port-hub ride edge.
+theorem hub_edge_bins_bound (w : World) (C : Nat) (seed : BinState)
+    (mask : Nat) (groups : List (List Nat))
+    (perm : List.Perm (maskWeights w mask) groups.flatten)
+    (fit : ∀ g ∈ groups, g.sum ≤ C) :
+    maskBin w C seed mask ≤ groups.length :=
+  binDP_le_feasible_groups C seed _ groups perm fit
+
+-- A complete joint path choice must be included before minimizing.
+-- Fleet and road budgets are disjoint, so the same concrete witness
+-- yields a bound for their sum.
+theorem hub_choice_cost_bound {α : Type} (options : List (List α)) (choice : List α)
+    (witness : HubChoiceWitness options choice)
+    (road fleet : List α → Nat) (top R F : Nat)
+    (roadBound : road choice ≤ R) (fleetBound : fleet choice ≤ F) :
+    exactCutMin top ((hubChoices options).map (fun c => road c+fleet c)) ≤ R+F := by
+  have hm := exactCutMin_le_member top _ (road choice+fleet choice)
+    (List.mem_map.mpr ⟨choice,hub_choices_complete witness,rfl⟩)
+  omega
+
+#print axioms hub_loop_erase
+#print axioms hub_choices_complete
+#print axioms hub_port_inventory_bound
+#print axioms hub_fleet_cost_bound
+#print axioms hub_choice_cost_bound
+end IslandLogistics
