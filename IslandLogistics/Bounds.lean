@@ -4224,6 +4224,7 @@ theorem massFerry_partition (w : World) (mass : Nat → Nat) (s : State)
     have single := sumN_single
       (fun q => if s.truck q = .onFerry f ∧ s.parcel p = .onTruck q then mass p else 0)
       w.trucks t ht (by intro q hq hn; simp [he,Ne.symm hn])
+    simp only [he] at single
     rw [single]
     simp [onFerryParcel,he]
 
@@ -4328,8 +4329,13 @@ theorem weighted_step_budget (w : World) (mass : Nat → Nat) (limit scale : Nat
           by_cases eq : q = t
           · subst q; simpa [parcelVertex,truckVertex,he,ht,setAt] using l.road p a b hp hr
           · simp [parcelVertex,truckVertex,he,setAt,eq])
-    change weightedValue w mass l s ≤ massLoad w mass s t*l.drivePrice +
-      weightedValue w mass l _ at h
+    have eqMass : sumN (fun p => if decide (s.parcel p = .onTruck t) then mass p else 0) w.parcels =
+        massLoad w mass s t := by
+      unfold massLoad
+      apply sumN_congr
+      intro p hp
+      by_cases he : s.parcel p = .onTruck t <;> simp [he]
+    rw [eqMass] at h
     have hm := massLoad_rule w mass limit rule s vl t valid.1
     have hprod := Nat.mul_le_mul hm hd
     simp only [Nat.mul_one]
@@ -4344,8 +4350,13 @@ theorem weighted_step_budget (w : World) (mass : Nat → Nat) (limit scale : Nat
           by_cases eq : q = t
           · subst q; simpa [parcelVertex,truckVertex,he,ht,hf,setAt] using l.board p f a hp hr
           · simp [parcelVertex,truckVertex,he,setAt,eq])
-    change weightedValue w mass l s ≤ massLoad w mass s t*l.boardPrice +
-      weightedValue w mass l _ at h
+    have eqMass : sumN (fun p => if decide (s.parcel p = .onTruck t) then mass p else 0) w.parcels =
+        massLoad w mass s t := by
+      unfold massLoad
+      apply sumN_congr
+      intro p hp
+      by_cases he : s.parcel p = .onTruck t <;> simp [he]
+    rw [eqMass] at h
     have hm := massLoad_rule w mass limit rule s vl t valid.1
     have hprod := Nat.mul_le_mul hm hb
     simp only [Nat.mul_one]
@@ -4361,8 +4372,13 @@ theorem weighted_step_budget (w : World) (mass : Nat → Nat) (limit scale : Nat
           · subst q; simpa [parcelVertex,truckVertex,he,ht,setAt] using
               l.disembark p f (s.ferry f) hp (vf f valid.2)
           · simp [parcelVertex,truckVertex,he,setAt,eq])
-    change weightedValue w mass l s ≤ massLoad w mass s t*l.boardPrice +
-      weightedValue w mass l _ at h
+    have eqMass : sumN (fun p => if decide (s.parcel p = .onTruck t) then mass p else 0) w.parcels =
+        massLoad w mass s t := by
+      unfold massLoad
+      apply sumN_congr
+      intro p hp
+      by_cases he : s.parcel p = .onTruck t <;> simp [he]
+    rw [eqMass] at h
     have hm := massLoad_rule w mass limit rule s vl t valid.1
     have hprod := Nat.mul_le_mul hm hb
     simp only [Nat.mul_one]
@@ -4379,7 +4395,7 @@ theorem weighted_step_budget (w : World) (mass : Nat → Nat) (limit scale : Nat
           | land x => simp [onFerryParcel,parcelVertex,truckVertex,he,ht]
           | onFerry g =>
             by_cases eq : g = f
-            · subst g; simpa [parcelVertex,truckVertex,he,ht,setAt] using
+            · subst g; simpa [onFerryParcel,parcelVertex,truckVertex,he,ht,setAt] using
                 l.sail p f (s.ferry f) b hp (vf f valid.1) hr
             · simp [onFerryParcel,parcelVertex,truckVertex,he,ht,setAt,eq])
     change weightedValue w mass l s ≤ massFerry w mass s f*l.sailPrice f +
