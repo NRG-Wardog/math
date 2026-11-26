@@ -2264,19 +2264,19 @@ theorem parcel_side_change_carrier (w : World) (side : Nat → Bool)
   | drive t a b ht hr valid =>
     cases eq : s.parcel p with
     | ground x => simp [physicalParcel,eq] at diff
-    | onTruck q => exact ⟨q,vp p hp q eq,eq,eq⟩
+    | onTruck q => exact ⟨q,vp p hp q eq,rfl,eq⟩
   | board t f a ht hf hr room valid =>
     cases eq : s.parcel p with
     | ground x => simp [physicalParcel,eq] at diff
-    | onTruck q => exact ⟨q,vp p hp q eq,eq,eq⟩
+    | onTruck q => exact ⟨q,vp p hp q eq,rfl,eq⟩
   | disembark t f ht valid =>
     cases eq : s.parcel p with
     | ground x => simp [physicalParcel,eq] at diff
-    | onTruck q => exact ⟨q,vp p hp q eq,eq,eq⟩
+    | onTruck q => exact ⟨q,vp p hp q eq,rfl,eq⟩
   | sail f b hr hne valid =>
     cases eq : s.parcel p with
     | ground x => simp [physicalParcel,eq] at diff
-    | onTruck q => exact ⟨q,vp p hp q eq,eq,eq⟩
+    | onTruck q => exact ⟨q,vp p hp q eq,rfl,eq⟩
   | load q t a hq ht room valid =>
     by_cases eq : p = q
     · subst q
