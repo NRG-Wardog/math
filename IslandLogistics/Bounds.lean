@@ -7413,7 +7413,7 @@ theorem ride_period_reduce (next : Nat → Nat) (a k : Nat) (hk : 0 < k)
   | zero => exact ⟨0,hk,rfl⟩
   | succ n ih =>
     obtain ⟨j,hj,he⟩ := ih
-    rw [ride_iter_succ,he,← ride_iter_succ]
+    rw [ride_iter_succ next n a,he,← ride_iter_succ next j a]
     by_cases eq : j+1 = k
     · rw [eq,period]
       exact ⟨0,hk,rfl⟩
