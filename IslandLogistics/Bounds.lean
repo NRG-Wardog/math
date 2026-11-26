@@ -413,3 +413,163 @@ theorem single_parcel_plus_handling (w : World) (p : Nat) (hp : p < w.parcels)
 #print axioms handling_path
 #print axioms single_parcel_plus_handling
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+def sailAt (s : State) (f b : Nat) : State :=
+  {s with ferry := setAt s.ferry f b}
+
+theorem setAt_same (v : Nat → Nat) (f b c : Nat) :
+    setAt (setAt v f b) f c = setAt v f c := by
+  funext i
+  by_cases e : i = f <;> simp [setAt, e]
+
+theorem setAt_commute (v : Nat → Nat) (f g b c : Nat) (hne : g ≠ f) :
+    setAt (setAt v f b) g c = setAt (setAt v g c) f b := by
+  funext i
+  by_cases e : i = f
+  · subst i
+    have hfg : f ≠ g := Ne.symm hne
+    simp [setAt, hfg]
+  · by_cases h : i = g <;> simp [setAt, e, h]
+
+-- Exactly the concrete transitions that do not perform a service or sail
+-- on the selected ferry. A truck aboard it cannot drive/load/unload
+-- because those operations require a land position.
+inductive OtherStep (w : World) (f : Nat) : State → State → Nat → Nat → Prop where
+  | drive (s : State) (t a b : Nat)
+      (ht : s.truck t = .land a) (hr : w.road a b)
+      (valid : t < w.trucks ∧ a < w.locations ∧ b < w.locations) :
+      OtherStep w f s {s with truck := setAt s.truck t (.land b)} 1 0
+  | board (s : State) (t g a : Nat)
+      (diff : g ≠ f) (ht : s.truck t = .land a) (hg : s.ferry g = a)
+      (hr : w.route g a) (room : occupancy w s g < w.slots g)
+      (valid : t < w.trucks ∧ g < w.ferries ∧ a < w.locations) :
+      OtherStep w f s {s with truck := setAt s.truck t (.onFerry g)} 1 0
+  | disembark (s : State) (t g : Nat)
+      (diff : g ≠ f) (ht : s.truck t = .onFerry g)
+      (valid : t < w.trucks ∧ g < w.ferries) :
+      OtherStep w f s {s with truck := setAt s.truck t (.land (s.ferry g))} 1 0
+  | sail (s : State) (g b : Nat)
+      (diff : g ≠ f) (hr : w.route g b) (hne : s.ferry g ≠ b)
+      (valid : g < w.ferries ∧ b < w.locations) :
+      OtherStep w f s (sailAt s g b) 3 0
+  | load (s : State) (p t a : Nat)
+      (hp : s.parcel p = .ground a) (ht : s.truck t = .land a)
+      (room : load w s t + w.weight p ≤ w.capacity t)
+      (valid : p < w.parcels ∧ t < w.trucks ∧ a < w.locations) :
+      OtherStep w f s {s with parcel := setAt s.parcel p (.onTruck t)} 0 1
+  | unload (s : State) (p t a : Nat)
+      (hp : s.parcel p = .onTruck t) (ht : s.truck t = .land a)
+      (valid : p < w.parcels ∧ t < w.trucks ∧ a < w.locations) :
+      OtherStep w f s {s with parcel := setAt s.parcel p (.ground a)} 0 1
+
+theorem other_is_step (w : World) (f : Nat) {s u : State} {m h : Nat}
+    (step : OtherStep w f s u m h) : Step w s u m h := by
+  cases step with
+  | drive t a b ht hr valid => exact Step.drive s t a b ht hr valid
+  | board t g a diff ht hg hr room valid => exact Step.board s t g a ht hg hr room valid
+  | disembark t g diff ht valid => exact Step.disembark s t g ht valid
+  | sail g b diff hr hne valid => exact Step.sail s g b hr hne valid
+  | load p t a hp ht room valid => exact Step.load s p t a hp ht room valid
+  | unload p t a hp ht valid => exact Step.unload s p t a hp ht valid
+
+theorem other_preserves_ferry (w : World) (f : Nat) {s u : State} {m h : Nat}
+    (step : OtherStep w f s u m h) : u.ferry f = s.ferry f := by
+  cases step with
+  | sail g b diff hr hne valid =>
+    simp [sailAt, setAt, Ne.symm diff]
+  | drive t a b ht hr valid => rfl
+  | board t g a diff ht hg hr room valid => rfl
+  | disembark t g diff ht valid => rfl
+  | load p t a hp ht room valid => rfl
+  | unload p t a hp ht valid => rfl
+
+-- The same unrelated action can be replayed after any reposition of f;
+-- its target is exactly the repositioned original target.
+theorem other_commutes (w : World) (f b : Nat) {s u : State} {m h : Nat}
+    (step : OtherStep w f s u m h) :
+    OtherStep w f (sailAt s f b) (sailAt u f b) m h := by
+  cases step with
+  | drive t a c ht hr valid =>
+    exact OtherStep.drive _ t a c ht hr valid
+  | board t g a diff ht hg hr room valid =>
+    have hg' : (sailAt s f b).ferry g = a := by simpa [sailAt, setAt, diff] using hg
+    exact OtherStep.board _ t g a diff ht hg' hr room valid
+  | disembark t g diff ht valid =>
+    have hg' : (sailAt s f b).ferry g = s.ferry g := by simp [sailAt, setAt, diff]
+    simpa [sailAt, setAt, diff] using
+      (OtherStep.disembark (w := w) (f := f) (sailAt s f b) t g diff ht valid)
+  | sail g c diff hr hne valid =>
+    have hne' : (sailAt s f b).ferry g ≠ c := by simpa [sailAt, setAt, diff] using hne
+    have eq : sailAt (sailAt s f b) g c = sailAt (sailAt s g c) f b := by
+      unfold sailAt
+      rw [setAt_commute s.ferry f g b c diff]
+    rw [← eq]
+    exact OtherStep.sail _ g c diff hr hne' valid
+  | load p t a hp ht room valid =>
+    exact OtherStep.load _ p t a hp ht room valid
+  | unload p t a hp ht valid =>
+    exact OtherStep.unload _ p t a hp ht valid
+
+theorem other_path_is_path (w : World) (f : Nat) {s u : State} {m h : Nat}
+    (p : Path (OtherStep w f) s u m h) : Path (Step w) s u m h := by
+  induction p with
+  | nil s => exact Path.nil s
+  | cons step rest ih => exact Path.cons (other_is_step w f step) ih
+
+theorem other_path_preserves_ferry (w : World) (f : Nat)
+    {s u : State} {m h : Nat} (p : Path (OtherStep w f) s u m h) :
+    u.ferry f = s.ferry f := by
+  induction p with
+  | nil s => rfl
+  | cons step rest ih => exact ih.trans (other_preserves_ferry w f step)
+
+theorem other_path_commutes (w : World) (f b : Nat)
+    {s u : State} {m h : Nat} (p : Path (OtherStep w f) s u m h) :
+    Path (OtherStep w f) (sailAt s f b) (sailAt u f b) m h := by
+  induction p with
+  | nil s => exact Path.nil _
+  | cons step rest ih => exact Path.cons (other_commutes w f b step) ih
+
+-- Delay a sail until after an arbitrary prefix with no events on that
+-- ferry. The result is exactly the same state, and the cost is unchanged.
+theorem delay_sail (w : World) (f b : Nat) {s u : State} {m h : Nat}
+    (p : Path (OtherStep w f) s u m h)
+    (hr : w.route f b) (hne : s.ferry f ≠ b)
+    (valid : f < w.ferries ∧ b < w.locations) :
+    Step w u (sailAt u f b) 3 0 := by
+  apply Step.sail u f b hr
+  · rw [other_path_preserves_ferry w f p]
+    exact hne
+  · exact valid
+
+-- Two consecutive sails, with no service between, can be replaced by
+-- a single direct sail (or zero actions when returning to the start).
+theorem contract_sails (w : World) (s : State) (f b c : Nat)
+    (hr : w.route f c) (valid : f < w.ferries ∧ c < w.locations) :
+    ∃ m : Nat, m ≤ 6 ∧ Path (Step w) s (sailAt (sailAt s f b) f c) m 0 := by
+  have eq : sailAt (sailAt s f b) f c = sailAt s f c := by
+    unfold sailAt
+    rw [setAt_same]
+  rw [eq]
+  by_cases same : s.ferry f = c
+  · have e : sailAt s f c = s := by
+      cases s with
+      | mk truck ferry parcel =>
+        simp only [sailAt, State.mk.injEq, true_and, and_true]
+        funext i
+        by_cases hi : i = f
+        · subst i
+          simp [setAt, same]
+        · simp [setAt, hi]
+    rw [e]
+    exact ⟨0, by omega, Path.nil s⟩
+  · exact ⟨3, by omega, Path.cons (Step.sail s f c hr same valid) (Path.nil _)⟩
+
+#print axioms other_commutes
+#print axioms other_path_commutes
+#print axioms delay_sail
+#print axioms contract_sails
+end IslandLogistics
