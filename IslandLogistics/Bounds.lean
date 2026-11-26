@@ -7856,3 +7856,244 @@ theorem hub_choice_cost_bound {α : Type} (options : List (List α)) (choice : L
 #print axioms hub_fleet_cost_bound
 #print axioms hub_choice_cost_bound
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- SailingPattern retains only the ferry locations and selected cargo
+-- islands. The contraction is required to preserve all road moves
+-- and all moves by discarded, positive-capacity ferries.
+structure SailSpec (w : World) where
+  loc : Nat → Nat
+  keepF : Nat → Bool
+  keepP : Nat → Bool
+  road : ∀ a b, w.road a b → loc a = loc b
+  dropped : ∀ f a b, 0 < w.slots f → keepF f = false →
+    w.route f a → w.route f b → loc a = loc b
+
+def SailView := (Nat → Nat) × (Nat → Nat)
+
+def sailView (r : SailSpec w) (s : State) : SailView :=
+  (fun f => if f < w.ferries ∧ r.keepF f = true then r.loc (s.ferry f) else 0,
+   fun p => if p < w.parcels ∧ r.keepP p = true then r.loc (physicalParcel s p) else 0)
+
+def sailCargo (r : SailSpec w) (s : State) (f p : Nat) : Bool :=
+  decide (p < w.parcels) && (r.keepP p && onFerryParcel s f p)
+
+theorem sail_cargo_carrier (r : SailSpec w) (s : State) (f p : Nat)
+    (hc : sailCargo r s f p = true) :
+    p < w.parcels ∧ r.keepP p = true ∧
+      s.parcel p = .onTruck (sourceOwner s p) ∧ s.truck (sourceOwner s p) = .onFerry f := by
+  cases he : s.parcel p with
+  | ground a => simp [sailCargo,onFerryParcel,he] at hc
+  | onTruck t => simpa [sailCargo,onFerryParcel,sourceOwner,he] using hc
+
+-- No assumption about bin-packing efficiency is needed: the real
+-- trucks aboard a ferry give an explicit feasible grouping.
+theorem sail_cargo_bins (r : SailSpec w) (s : State) (f C : Nat)
+    (seed : BinState) (hf : f < w.ferries) (v : CarrierInvariant w s)
+    (cap : ∀ t, t < w.trucks → w.capacity t ≤ C) :
+    (binDP C seed (selectedWeights w (sailCargo r s f)).length
+      (selectedWeights w (sailCargo r s f))).1 ≤ w.slots f := by
+  let ts := (List.range w.trucks).filter (fun t => decide (s.truck t = .onFerry f))
+  have cover : ∀ p, p < w.parcels → sailCargo r s f p = true → sourceOwner s p ∈ ts := by
+    intro p hp hc
+    have h := sail_cargo_carrier r s f p hc
+    have ht := v.parcels p hp (sourceOwner s p) h.2.2.1
+    simp [ts,ht,h.2.2.2]
+  have good := groupWeights_fit w s C (sourceOwner s) ts (sailCargo r s f) v.loads cap
+    (fun t ht => by simpa [ts] using (List.mem_filter.mp ht).1)
+    (fun p _ hc => (sail_cargo_carrier r s f p hc).2.2.1)
+  have perm := groupWeights_perm w (sourceOwner s) ts (sailCargo r s f) cover
+  have hb := binDP_le_feasible_groups C seed _ _ perm good
+  rw [groupWeights_length] at hb
+  have hn : ts.length = occupancy w s f := by
+    unfold ts occupancy
+    rw [filtered_count_eq_sum]
+    apply sumN_congr
+    intro t _
+    by_cases ht : s.truck t = .onFerry f <;> simp [ht]
+  rw [hn] at hb
+  exact Nat.le_trans hb (v.occupancy f hf)
+
+theorem sail_view_congr (r : SailSpec w) {s u : State}
+    (hf : ∀ f, f < w.ferries → r.keepF f = true → r.loc (s.ferry f) = r.loc (u.ferry f))
+    (hp : ∀ p, p < w.parcels → r.keepP p = true →
+      r.loc (physicalParcel s p) = r.loc (physicalParcel u p)) :
+    sailView r s = sailView r u := by
+  apply Prod.ext
+  · funext f
+    change (if f < w.ferries ∧ r.keepF f = true then r.loc (s.ferry f) else 0) = _
+    by_cases h : f < w.ferries ∧ r.keepF f = true
+    · simp [sailView,h,hf f h.1 h.2]
+    · simp [sailView,h]
+  · funext p
+    change (if p < w.parcels ∧ r.keepP p = true then r.loc (physicalParcel s p) else 0) = _
+    by_cases h : p < w.parcels ∧ r.keepP p = true
+    · simp [sailView,h,hp p h.1 h.2]
+    · simp [sailView,h]
+
+theorem sail_physical_update (s : State) (f b p : Nat) :
+    physicalParcel {s with ferry := setAt s.ferry f b} p =
+      if onFerryParcel s f p then b else physicalParcel s p := by
+  cases hp : s.parcel p with
+  | ground a => simp [physicalParcel,onFerryParcel,hp]
+  | onTruck t =>
+    cases ht : s.truck t with
+    | land a => simp [physicalParcel,physicalTruck,onFerryParcel,hp,ht]
+    | onFerry g =>
+      by_cases he : g = f <;> simp [physicalParcel,physicalTruck,onFerryParcel,hp,ht,setAt,he]
+
+theorem sail_cargo_at_origin (r : SailSpec w) (s : State) (f p : Nat)
+    (hc : sailCargo r s f p = true) :
+    (sailView r s).2 p = r.loc (s.ferry f) := by
+  have h := sail_cargo_carrier r s f p hc
+  simp [sailView,h.1,h.2.1,physicalParcel,physicalTruck,h.2.2.1,h.2.2.2]
+
+def sailMove (x : SailView) (f b : Nat) (cargo : Nat → Bool) : SailView :=
+  (setAt x.1 f b, fun p => if cargo p then b else x.2 p)
+
+theorem sail_view_retained (r : SailSpec w) (s : State) (f b : Nat)
+    (hf : f < w.ferries) (hk : r.keepF f = true) :
+    sailView r {s with ferry := setAt s.ferry f b} =
+      sailMove (sailView r s) f (r.loc b) (sailCargo r s f) := by
+  apply Prod.ext
+  · funext g
+    by_cases he : g = f
+    · subst g; simp [sailView,sailMove,setAt,hf,hk]
+    · simp [sailView,sailMove,setAt,he]
+  · funext p
+    by_cases hp : p < w.parcels
+    · cases hkp : r.keepP p <;> cases ha : onFerryParcel s f p <;>
+        simp [sailView,sailMove,sailCargo,hp,hkp,ha,sail_physical_update]
+    · simp [sailView,sailMove,sailCargo,hp]
+
+-- The table's checked edges are exactly these transitions: one
+-- retained ferry moves, with any collocated cargo fitting its slots.
+structure SailTable (w : World) (r : SailSpec w) (C : Nat) (seed : BinState) where
+  value : SailView → Nat
+  bellman : ∀ x f b cargo, f < w.ferries → r.keepF f = true →
+    (∃ a, w.route f a ∧ x.1 f = r.loc a) →
+    (∃ a, w.route f a ∧ b = r.loc a) →
+    (∀ p, cargo p = true → p < w.parcels ∧ r.keepP p = true ∧ x.2 p = x.1 f) →
+    (binDP C seed (selectedWeights w cargo).length (selectedWeights w cargo)).1 ≤ w.slots f →
+    value x ≤ 1 + value (sailMove x f b cargo)
+  goal : ∀ x, (∀ p, p < w.parcels → r.keepP p = true → x.2 p = r.loc (w.goal p)) →
+    value x = 0
+
+theorem sail_table_step (r : SailSpec w) (C : Nat) (seed : BinState)
+    (tab : SailTable w r C seed) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    {s u : State} {a : ActionLabel} {m h : Nat} (st : LabelStep w s u a m h)
+    (v : CarrierInvariant w s) :
+    tab.value (sailView r s) ≤ sailCount a + tab.value (sailView r u) := by
+  cases st with
+  | drive t a b ht hr hv =>
+    have he := sail_view_congr r (s := s) (u := {s with truck := setAt s.truck t (.land b)})
+      (by intros; rfl) (by
+        intro p hp hk
+        cases hpp : s.parcel p with
+        | ground c => simp [physicalParcel,hpp]
+        | onTruck q =>
+          by_cases hq : q = t
+          · subst q; simp [physicalParcel,physicalTruck,hpp,setAt,ht,r.road a b hr]
+          · simp [physicalParcel,physicalTruck,hpp,setAt,hq])
+    rw [← he]; simp [sailCount]
+  | board t f a ht hf hr room hv =>
+    have he := sail_view_congr r (s := s) (u := {s with truck := setAt s.truck t (.onFerry f)})
+      (by intros; rfl) (by
+        intro p hp hk
+        cases hpp : s.parcel p with
+        | ground c => simp [physicalParcel,hpp]
+        | onTruck q =>
+          by_cases hq : q = t
+          · subst q; simp [physicalParcel,physicalTruck,hpp,setAt,ht,hf]
+          · simp [physicalParcel,physicalTruck,hpp,setAt,hq])
+    rw [← he]; simp [sailCount]
+  | disembark t f ht hv =>
+    have he := sail_view_congr r (s := s) (u := {s with truck := setAt s.truck t (.land (s.ferry f))})
+      (by intros; rfl) (by
+        intro p hp hk
+        cases hpp : s.parcel p with
+        | ground c => simp [physicalParcel,hpp]
+        | onTruck q =>
+          by_cases hq : q = t
+          · subst q; simp [physicalParcel,physicalTruck,hpp,setAt,ht]
+          · simp [physicalParcel,physicalTruck,hpp,setAt,hq])
+    rw [← he]; simp [sailCount]
+  | sail f b hr hn hv =>
+    cases hk : r.keepF f with
+    | true =>
+      rw [sail_view_retained r s f b hv.1 hk]
+      have ho : (sailView r s).1 f = r.loc (s.ferry f) := by simp [sailView,hv.1,hk]
+      apply tab.bellman _ f (r.loc b) (sailCargo r s f) hv.1 hk
+      · exact ⟨s.ferry f,v.ferries f hv.1,ho⟩
+      · exact ⟨b,hr,rfl⟩
+      · intro p hc
+        have hp := sail_cargo_carrier r s f p hc
+        exact ⟨hp.1,hp.2.1,(sail_cargo_at_origin r s f p hc).trans ho.symm⟩
+      · exact sail_cargo_bins r s f C seed hv.1 v cap
+    | false =>
+      have he := sail_view_congr r (s := s) (u := {s with ferry := setAt s.ferry f b})
+        (by
+          intro g hg hkg
+          by_cases he : g = f
+          · subst g; simp [hk] at hkg
+          · simp [setAt,he])
+        (by
+          intro p hp hkp
+          rw [sail_physical_update]
+          cases hc : onFerryParcel s f p with
+          | false => simp [hc]
+          | true =>
+            have hs : sailCargo r s f p = true := by simp [sailCargo,hp,hkp,hc]
+            have h := sail_cargo_carrier r s f p hs
+            have ht := v.parcels p hp _ h.2.2.1
+            have hf := v.trucks _ ht f h.2.2.2
+            simpa [hc,physicalParcel,physicalTruck,h.2.2.1,h.2.2.2] using
+              r.dropped f (s.ferry f) b hf.2 hk (v.ferries f hv.1) hr)
+      rw [← he]; simp [sailCount]
+  | load p t a hp ht room hv =>
+    have he := sail_view_congr r (s := s) (u := {s with parcel := setAt s.parcel p (.onTruck t)})
+      (by intros; rfl) (by
+        intro q hq hk
+        by_cases h : q = p
+        · subst q; simp [physicalParcel,physicalTruck,setAt,hp,ht]
+        · simp [physicalParcel,setAt,h])
+    rw [← he]; simp [sailCount]
+  | unload p t a hp ht hv =>
+    have he := sail_view_congr r (s := s) (u := {s with parcel := setAt s.parcel p (.ground a)})
+      (by intros; rfl) (by
+        intro q hq hk
+        by_cases h : q = p
+        · subst q; simp [physicalParcel,physicalTruck,setAt,hp,ht]
+        · simp [physicalParcel,setAt,h])
+    rw [← he]; simp [sailCount]
+
+theorem sailing_trace_budget (r : SailSpec w) (C : Nat) (seed : BinState)
+    (tab : SailTable w r C seed) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {d x f : Nat}
+    (counts : TraceCounts w tr d x f) (v : CarrierInvariant w s) :
+    tab.value (sailView r s) ≤ f + tab.value (sailView r u) := by
+  induction counts with
+  | nil s => simp
+  | @cons s v' u a b m h st tail act d x f lab tailCounts ih =>
+    have hb := sail_table_step r C seed tab cap lab v
+    have ht := ih (step_carrier_invariant w st v)
+    omega
+
+theorem sailing_pattern_admissible (r : SailSpec w) (C : Nat) (seed : BinState)
+    (tab : SailTable w r C seed) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {d x f : Nat}
+    (counts : TraceCounts w tr d x f) (v : CarrierInvariant w s) (done : Goal w u) :
+    tab.value (sailView r s) ≤ f := by
+  have hb := sailing_trace_budget r C seed tab cap counts v
+  have hz : tab.value (sailView r u) = 0 := by
+    apply tab.goal
+    intro p hp hk
+    simp [sailView,hp,hk,physicalParcel,done p hp]
+  simpa [hz] using hb
+
+#print axioms sail_cargo_bins
+#print axioms sail_table_step
+#print axioms sailing_pattern_admissible
+end IslandLogistics
