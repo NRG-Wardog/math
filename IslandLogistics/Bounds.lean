@@ -4834,3 +4834,216 @@ theorem geo_project_label (r : GeoSpec w) {s u : State}
 #print axioms geo_valid_occupancy
 #print axioms geo_project_label
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+def flagCost (b : Bool) : Nat := if b then 1 else 0
+
+def geoActualCharge (r : GeoSpec w) : ActionLabel → Nat
+  | .drive _ a b => flagCost (r.chargeRoad a b)
+  | .board _ f _ | .disembark _ f => flagCost (r.keepF f)
+  | .sail f _ => 3 * flagCost (r.keepF f)
+  | .load _ _ _ => 0
+  | .unload p _ a =>
+    if a = w.goal p then 0 else 2 * flagCost (r.keepP p && r.extraP p)
+
+def geoAbstractCharge (r : GeoSpec w) : ActionLabel → Nat
+  | .drive _ _ _ | .board _ _ _ | .disembark _ _ => 1
+  | .sail _ _ => 3
+  | .load _ _ _ => 0
+  | .unload p _ a => if a = r.loc (w.goal p) then 0 else 2 * flagCost (r.extraP p)
+
+theorem geo_charge_refinement (r : GeoSpec w) (a : ActionLabel)
+    (enabled : geoEnabled r a) :
+    geoAbstractCharge r (mapLabel r a) ≤ geoActualCharge r a := by
+  cases a with
+  | drive t a b => simp [mapLabel,geoAbstractCharge,geoActualCharge,flagCost,enabled.2]
+  | board t f a => simp [mapLabel,geoAbstractCharge,geoActualCharge,flagCost,geoEnabled] at enabled ⊢; simp [enabled]
+  | disembark t f => simp [mapLabel,geoAbstractCharge,geoActualCharge,flagCost,geoEnabled] at enabled ⊢; simp [enabled]
+  | sail f b => simp [mapLabel,geoAbstractCharge,geoActualCharge,flagCost,geoEnabled] at enabled ⊢; simp [enabled]
+  | load p t a => rfl
+  | unload p t a =>
+    have hk : r.keepP p = true := enabled
+    simp only [mapLabel,geoAbstractCharge,geoActualCharge,hk,Bool.true_and]
+    by_cases he : a = w.goal p
+    · simp [he]
+    · simp [he]
+      split <;> omega
+
+-- A table must be checked on its complete projected edge set, not on
+-- sampled concrete states or only on the forward search trajectory.
+structure GeoTable (w : World) where
+  spec : GeoSpec w
+  potential : State → Nat
+  bellman : ∀ {s u a m h}, LabelStep spec.world s u a m h →
+    ValidTruckLoad spec.world s → ValidFerryOccupancy spec.world s →
+    potential s ≤ geoAbstractCharge spec a + potential u
+  goal : ∀ s, Goal spec.world s → potential s = 0
+
+def geoValue (g : GeoTable w) (s : State) : Nat :=
+  g.potential (geoState g.spec s)
+
+theorem geo_table_step (g : GeoTable w) {s u a m h}
+    (st : LabelStep w s u a m h) (vl : ValidTruckLoad w s)
+    (vo : ValidFerryOccupancy w s) (vf : ValidFerries w s)
+    (vt : ValidTruckCarriers w s) :
+    geoValue g s ≤ geoActualCharge g.spec a + geoValue g u := by
+  unfold geoValue
+  rcases geo_project_label g.spec st vf vt with eq | ⟨en,edge⟩
+  · rw [eq]; omega
+  · have h1 := g.bellman edge (geo_valid_load g.spec s vl) (geo_valid_occupancy g.spec s vo)
+    have h2 := geo_charge_refinement g.spec a en
+    omega
+
+theorem geo_sum_mul (xs : List α) (f : α → Nat) (k : Nat) :
+    (xs.map (fun x => k * f x)).sum = k * (xs.map f).sum := by
+  induction xs with
+  | nil => simp
+  | cons x xs ih => simp [ih,Nat.mul_add]
+
+def GeoDisjoint (w : World) (sys : RoadCutSystem w) (gs : List (GeoTable w)) : Prop :=
+  (∀ a b, w.road a b →
+    (sys.cuts.map (fun side => sideDelta side a b)).sum +
+      (gs.map (fun g => flagCost (g.spec.chargeRoad a b))).sum ≤ 1) ∧
+  (∀ f, (gs.map (fun g => flagCost (g.spec.keepF f))).sum ≤ 1) ∧
+  (∀ p, (gs.map (fun g => flagCost (g.spec.keepP p && g.spec.extraP p))).sum ≤ 1)
+
+theorem extra_unload_eq (w : World) (s : State) (p t a : Nat)
+    (hp : s.parcel p = .onTruck t) (valid : p < w.parcels) :
+    extraUnload w s {s with parcel := setAt s.parcel p (.ground a)} =
+      if a = w.goal p then 0 else 2 := by
+  unfold extraUnload
+  rw [sumN_single _ _ p valid (by
+    intro q hq ne
+    apply extra_same
+    simp [setAt,ne])]
+  simp [extraOne,hp,setAt]
+
+theorem geo_action_partition (w : World) (sys : RoadCutSystem w)
+    (gs : List (GeoTable w)) (disjoint : GeoDisjoint w sys gs)
+    {s u a m h} (st : LabelStep w s u a m h)
+    (vf : ValidFerries w s) (vt : ValidTruckCarriers w s) :
+    (sys.cuts.map (fun side => truckFlux w side s u)).sum +
+      (gs.map (fun g => geoActualCharge g.spec a)).sum ≤ m + extraUnload w s u := by
+  cases st with
+  | drive t a b ht hr valid =>
+    rw [sum_map_eq_on sys.cuts _ (fun side => sideDelta side a b)
+      (fun side _ => step_drive_flux w side s t a b ht valid.1)]
+    have hb := disjoint.1 a b hr
+    change _ + (gs.map (fun g => flagCost (g.spec.chargeRoad a b))).sum ≤ _
+    omega
+  | board t f a ht hf hr room valid =>
+    rw [sum_map_eq_zero sys.cuts _ (by
+      intro side hside
+      apply flux_zero_of_same_side
+      intro q hq
+      by_cases eq : q = t
+      · subst q; simp [physicalTruck,ht,hf,setAt]
+      · simp [physicalTruck,setAt,eq])]
+    have hb := disjoint.2.1 f
+    change 0 + (gs.map (fun g => flagCost (g.spec.keepF f))).sum ≤ _
+    omega
+  | disembark t f ht valid =>
+    rw [sum_map_eq_zero sys.cuts _ (by
+      intro side hside
+      apply flux_zero_of_same_side
+      intro q hq
+      by_cases eq : q = t
+      · subst q; simp [physicalTruck,ht,setAt]
+      · simp [physicalTruck,setAt,eq])]
+    have hb := disjoint.2.1 f
+    change 0 + (gs.map (fun g => flagCost (g.spec.keepF f))).sum ≤ _
+    omega
+  | sail f b hr hne valid =>
+    rw [sum_map_eq_zero sys.cuts _ (by
+      intro side hside
+      apply flux_zero_of_same_side
+      intro q hq
+      cases he : s.truck q with
+      | land a => simp [physicalTruck,he]
+      | onFerry g =>
+        by_cases eq : g = f
+        · subst g
+          have hk := vt q hq f he
+          simpa [physicalTruck,he,setAt] using
+            sys.ferry side hside f (s.ferry f) b hk.2 (vf f hk.1) hr
+        · simp [physicalTruck,he,setAt,eq])]
+    change 0 + (gs.map (fun g => 3 * flagCost (g.spec.keepF f))).sum ≤ _
+    rw [geo_sum_mul]
+    have hb := disjoint.2.1 f
+    omega
+  | load p t a hp ht room valid =>
+    rw [sum_map_eq_zero sys.cuts _ (fun side _ =>
+      flux_zero_of_same_side w side s {s with parcel := setAt s.parcel p (.onTruck t)} (fun _ _ => rfl))]
+    rw [sum_map_eq_zero gs _ (by intro g hg; rfl)]
+    omega
+  | unload p t a hp ht valid =>
+    rw [sum_map_eq_zero sys.cuts _ (fun side _ =>
+      flux_zero_of_same_side w side s {s with parcel := setAt s.parcel p (.ground a)} (fun _ _ => rfl))]
+    rw [extra_unload_eq w s p t a hp valid.1]
+    by_cases he : a = w.goal p
+    · rw [sum_map_eq_zero gs _ (by intro g hg; simp [geoActualCharge,he])]
+      simp [he]
+    · have hz : (gs.map (fun g => geoActualCharge g.spec (.unload p t a))).sum =
+          (gs.map (fun g => 2 * flagCost (g.spec.keepP p && g.spec.extraP p))).sum := by
+        apply sum_map_eq_on
+        intro g hg
+        simp [geoActualCharge,he]
+      rw [hz,geo_sum_mul]
+      have hb := disjoint.2.2 p
+      simp [he]
+      omega
+
+-- Telescoping ALL pattern potentials plus bridge crossings on the same
+-- real trace. The only extra budget is the real non-goal unload budget.
+theorem geographic_trace_budget (w : World) (sys : RoadCutSystem w)
+    (gs : List (GeoTable w)) (disjoint : GeoDisjoint w sys gs)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (vl : ValidTruckLoad w s) (vo : ValidFerryOccupancy w s)
+    (vf : ValidFerries w s) (vt : ValidTruckCarriers w s) :
+    (gs.map (fun g => geoValue g s)).sum +
+      (sys.cuts.map (fun side => traceIn w side tr + traceOut w side tr)).sum ≤
+      m + traceExtra w tr + (gs.map (fun g => geoValue g u)).sum := by
+  induction tr with
+  | nil s => simp [traceIn,traceOut,traceExtra,sum_map_eq_zero]
+  | @cons s v u a b m h st tail ih =>
+    obtain ⟨act,lst⟩ := label_step_complete w st
+    have hb := geo_action_partition w sys gs disjoint lst vf vt
+    have hg := sum_map_le gs (fun g => geoValue g s)
+      (fun g => geoActualCharge g.spec act + geoValue g v)
+      (fun g _ => geo_table_step g lst vl vo vf vt)
+    rw [sum_map_add_nat] at hg
+    have ht := ih (step_valid_load w st vl) (step_valid_occupancy w st vo)
+      (step_valid_ferries w st vf) (step_valid_truck_carriers w st vt)
+    rw [sum_map_eq_on sys.cuts _
+      (fun side => truckFlux w side s v + (traceIn w side tail + traceOut w side tail))
+      (by intro side hs; simp [truckFlux,traceIn,traceOut]; omega)]
+    rw [sum_map_add_nat]
+    simp only [traceExtra]
+    omega
+
+theorem geographic_portfolio_admissible (w : World) (sys : RoadCutSystem w)
+    (gs : List (GeoTable w)) (disjoint : GeoDisjoint w sys gs)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (vo : ValidFerryOccupancy w s) (vf : ValidFerries w s) (vt : ValidTruckCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C) (seed : BinState) :
+    handling w s + (gs.map (fun g => geoValue g s)).sum +
+      (sys.cuts.map (fun side => independentCutCost w side s C seed)).sum ≤ m+h := by
+  obtain ⟨tr⟩ := trace_from_path w path
+  have hb := geographic_trace_budget w sys gs disjoint tr vl vo vf vt
+  rw [sum_map_eq_zero gs _ (fun g _ => g.goal _ (geo_goal g.spec u done))] at hb
+  have hc : (sys.cuts.map (fun side => independentCutCost w side s C seed)).sum ≤
+      (sys.cuts.map (fun side => traceIn w side tr + traceOut w side tr)).sum := by
+    apply sum_map_le
+    intro side _
+    exact (concrete_visit_cut_profile_bound w side (trace_flux_path w side tr) done vl vp C cap seed).2
+  have hh := residual_goal_budget w (trace_residual w tr) done
+  omega
+
+#print axioms geo_charge_refinement
+#print axioms geo_table_step
+#print axioms geo_action_partition
+#print axioms geographic_portfolio_admissible
+end IslandLogistics
