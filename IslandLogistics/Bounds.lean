@@ -4113,10 +4113,13 @@ theorem sumN_swap (f : Nat → Nat → Nat) (n m : Nat) :
 def massLoad (w : World) (mass : Nat → Nat) (s : State) (t : Nat) : Nat :=
   sumN (fun p => if s.parcel p = .onTruck t then mass p else 0) w.parcels
 
+def onFerryParcel (s : State) (f p : Nat) : Bool :=
+  match s.parcel p with
+  | .ground _ => false
+  | .onTruck t => decide (s.truck t = .onFerry f)
+
 def massFerry (w : World) (mass : Nat → Nat) (s : State) (f : Nat) : Nat :=
-  sumN (fun p => if (match s.parcel p with
-    | .ground _ => false
-    | .onTruck t => s.truck t == .onFerry f) then mass p else 0) w.parcels
+  sumN (fun p => if onFerryParcel s f p then mass p else 0) w.parcels
 
 def ValidFerryOccupancy (w : World) (s : State) : Prop :=
   ∀ f, f < w.ferries → occupancy w s f ≤ w.slots f
@@ -4215,16 +4218,16 @@ theorem massFerry_partition (w : World) (mass : Nat → Nat) (s : State)
   apply sumN_congr
   intro p hp
   cases he : s.parcel p with
-  | ground a => simp [he,sumN_zero]
+  | ground a => simp [onFerryParcel,he,sumN_zero]
   | onTruck t =>
     have ht := vp p hp t he
     have single := sumN_single
       (fun q => if s.truck q = .onFerry f ∧ s.parcel p = .onTruck q then mass p else 0)
       w.trucks t ht (by intro q hq hn; simp [he,Ne.symm hn])
     rw [single]
-    simp [he]
+    simp [onFerryParcel,he]
 
-structure MassRule (w : World) (mass : Nat → Nat) (limit : Nat) : Prop where
+structure MassRule (w : World) (mass : Nat → Nat) (limit : Nat) where
   unit : Nat
   positive : 0 < unit
   item : ∀ p, p < w.parcels → unit * mass p ≤ w.weight p
@@ -4246,7 +4249,7 @@ theorem massLoad_rule (w : World) (mass : Nat → Nat) (limit : Nat)
   by_cases he : massLoad w mass s t ≤ limit
   · exact he
   · have hm := Nat.mul_le_mul_left rule.unit (show limit+1 ≤ massLoad w mass s t by omega)
-    omega
+    exact False.elim (Nat.not_lt_of_ge hm hb)
 
 theorem massFerry_rule (w : World) (mass : Nat → Nat) (limit : Nat)
     (rule : MassRule w mass limit) (s : State) (vl : ValidTruckLoad w s)
@@ -4284,7 +4287,7 @@ def weightedValue (w : World) (mass : Nat → Nat) (l : WeightedLabels w) (s : S
 
 theorem weighted_value_le_charge (w : World) (mass : Nat → Nat)
     (l : WeightedLabels w) (s u : State) (affected : Nat → Bool) (price : Nat)
-    (local : ∀ p, p < w.parcels →
+    (pointwise : ∀ p, p < w.parcels →
       l.label p (parcelVertex s p) ≤ (if affected p then price else 0) +
         l.label p (parcelVertex u p)) :
     weightedValue w mass l s ≤
@@ -4294,7 +4297,7 @@ theorem weighted_value_le_charge (w : World) (mass : Nat → Nat)
   rw [← sumN_mul_right,← sumN_add]
   apply sumN_mono
   intro p hp
-  have h := Nat.mul_le_mul_left (mass p) (local p hp)
+  have h := Nat.mul_le_mul_left (mass p) (pointwise p hp)
   rw [Nat.mul_add] at h
   cases he : affected p <;> simp [he] at h ⊢ <;> omega
 
@@ -4316,7 +4319,7 @@ theorem weighted_step_budget (w : World) (mass : Nat → Nat) (limit scale : Nat
     weightedValue w mass l s ≤ limit*scale*m + weightedValue w mass l u := by
   cases st with
   | drive t a b ht hr valid =>
-    have h := weighted_value_le_charge w mass l s _
+    have h := weighted_value_le_charge w mass l s {s with truck := setAt s.truck t (.land b)}
       (fun p => decide (s.parcel p = .onTruck t)) l.drivePrice (by
         intro p hp
         cases he : s.parcel p with
@@ -4332,7 +4335,7 @@ theorem weighted_step_budget (w : World) (mass : Nat → Nat) (limit scale : Nat
     simp only [Nat.mul_one]
     omega
   | board t f a ht hf hr room valid =>
-    have h := weighted_value_le_charge w mass l s _
+    have h := weighted_value_le_charge w mass l s {s with truck := setAt s.truck t (.onFerry f)}
       (fun p => decide (s.parcel p = .onTruck t)) l.boardPrice (by
         intro p hp
         cases he : s.parcel p with
@@ -4348,7 +4351,7 @@ theorem weighted_step_budget (w : World) (mass : Nat → Nat) (limit scale : Nat
     simp only [Nat.mul_one]
     omega
   | disembark t f ht valid =>
-    have h := weighted_value_le_charge w mass l s _
+    have h := weighted_value_le_charge w mass l s {s with truck := setAt s.truck t (.land (s.ferry f))}
       (fun p => decide (s.parcel p = .onTruck t)) l.boardPrice (by
         intro p hp
         cases he : s.parcel p with
@@ -4365,20 +4368,20 @@ theorem weighted_step_budget (w : World) (mass : Nat → Nat) (limit scale : Nat
     simp only [Nat.mul_one]
     omega
   | sail f b hr hne valid =>
-    have h := weighted_value_le_charge w mass l s _
-      (fun p => match s.parcel p with | .ground _ => false | .onTruck t => s.truck t == .onFerry f)
+    have h := weighted_value_le_charge w mass l s {s with ferry := setAt s.ferry f b}
+      (onFerryParcel s f)
       (l.sailPrice f) (by
         intro p hp
         cases he : s.parcel p with
-        | ground x => simp [parcelVertex,he]
+        | ground x => simp [onFerryParcel,parcelVertex,he]
         | onTruck t =>
           cases ht : s.truck t with
-          | land x => simp [parcelVertex,truckVertex,he,ht]
+          | land x => simp [onFerryParcel,parcelVertex,truckVertex,he,ht]
           | onFerry g =>
             by_cases eq : g = f
             · subst g; simpa [parcelVertex,truckVertex,he,ht,setAt] using
                 l.sail p f (s.ferry f) b hp (vf f valid.1) hr
-            · simp [parcelVertex,truckVertex,he,ht,setAt,eq])
+            · simp [onFerryParcel,parcelVertex,truckVertex,he,ht,setAt,eq])
     change weightedValue w mass l s ≤ massFerry w mass s f*l.sailPrice f +
       weightedValue w mass l _ at h
     have hm := massFerry_rule w mass limit rule s vl vp vo f valid.1
@@ -4390,14 +4393,14 @@ theorem weighted_step_budget (w : World) (mass : Nat → Nat) (limit scale : Nat
     rw [he] at h2
     omega
   | load p t a hp ht room valid =>
-    have he := weighted_unchanged w mass l s _ (by
+    have he := weighted_unchanged w mass l s {s with parcel := setAt s.parcel p (.onTruck t)} (by
       intro q hq
       by_cases eq : q = p
       · subst q; simp [parcelVertex,truckVertex,hp,ht,setAt]
       · simp [parcelVertex,truckVertex,setAt,eq])
     simp [he]
   | unload p t a hp ht valid =>
-    have he := weighted_unchanged w mass l s _ (by
+    have he := weighted_unchanged w mass l s {s with parcel := setAt s.parcel p (.ground a)} (by
       intro q hq
       by_cases eq : q = p
       · subst q; simp [parcelVertex,truckVertex,hp,ht,setAt]
