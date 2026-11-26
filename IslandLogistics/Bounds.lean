@@ -5365,30 +5365,27 @@ theorem ground_step_flux_label (w : World) (island : Nat → Nat)
       rw [sumN_congr _ (fun _ => 0) _ (by
         intro q hq
         rw [← hs q hq]
-        cases groundIslandSide island i (truckVertex s q) <;> rfl),sumN_zero]
+        change (if !groundIslandSide island i (truckVertex s q) && groundIslandSide island i (truckVertex s q) then 1 else 0) = 0
+      cases groundIslandSide island i (truckVertex s q) <;> rfl),sumN_zero]
   | board t f a ht hf hr room valid =>
     constructor
     · rw [sumN_single _ _ t valid.1 (by
         intro q hq ne
-        simp [truckVertex,setAt,ne]
-        cases groundIslandSide island i (truckVertex s q) <;> rfl)]
+        simp [truckVertex,setAt,ne])]
       simp [truckVertex,ht,setAt,groundIslandSide]
     · rw [sumN_single _ _ t valid.1 (by
         intro q hq ne
-        simp [truckVertex,setAt,ne]
-        cases groundIslandSide island i (truckVertex s q) <;> rfl)]
+        simp [truckVertex,setAt,ne])]
       simp [truckVertex,ht,setAt,groundIslandSide,flagCost]
   | disembark t f ht valid =>
     constructor
     · rw [sumN_single _ _ t valid.1 (by
         intro q hq ne
-        simp [truckVertex,setAt,ne]
-        cases groundIslandSide island i (truckVertex s q) <;> rfl)]
+        simp [truckVertex,setAt,ne])]
       simp [truckVertex,ht,setAt,groundIslandSide,flagCost]
     · rw [sumN_single _ _ t valid.1 (by
         intro q hq ne
-        simp [truckVertex,setAt,ne]
-        cases groundIslandSide island i (truckVertex s q) <;> rfl)]
+        simp [truckVertex,setAt,ne])]
       simp [truckVertex,ht,setAt,groundIslandSide]
   | sail f b hr hne valid =>
     have hs : ∀ q, q < w.trucks →
@@ -5400,14 +5397,21 @@ theorem ground_step_flux_label (w : World) (island : Nat → Nat)
       rw [sumN_congr _ (fun _ => 0) _ (by
         intro q hq
         rw [← hs q hq]
-        cases groundIslandSide island i (truckVertex s q) <;> rfl),sumN_zero]
+        change (if !groundIslandSide island i (truckVertex s q) && groundIslandSide island i (truckVertex s q) then 1 else 0) = 0
+      cases groundIslandSide island i (truckVertex s q) <;> rfl),sumN_zero]
   | load p t a hp ht room valid =>
+    have hs : ∀ q, truckVertex {s with parcel := setAt s.parcel p (.onTruck t)} q = truckVertex s q := by
+      intro q; cases he : s.truck q <;> simp [truckVertex,he]
     constructor <;> rw [sumN_congr _ (fun _ => 0) _ (by
       intro q hq
+      rw [hs q]
       cases groundIslandSide island i (truckVertex s q) <;> rfl),sumN_zero]
   | unload p t a hp ht valid =>
+    have hs : ∀ q, truckVertex {s with parcel := setAt s.parcel p (.ground a)} q = truckVertex s q := by
+      intro q; cases he : s.truck q <;> simp [truckVertex,he]
     constructor <;> rw [sumN_congr _ (fun _ => 0) _ (by
       intro q hq
+      rw [hs q]
       cases groundIslandSide island i (truckVertex s q) <;> rfl),sumN_zero]
 
 #print axioms ground_island_demands_bound
