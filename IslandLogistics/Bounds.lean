@@ -1267,7 +1267,7 @@ theorem evalCut_le_witness (top : Nat) {tree mask cost}
   | split hm hs hleft hright il ir =>
     apply Nat.le_trans (mergeValue_witness _ _ _ _ _ hm hs)
     omega
-  | repeat hw ih =>
+  | «repeat» hw ih =>
     simp only [evalCut]
     omega
 
@@ -1296,7 +1296,16 @@ theorem assignmentCutBound_le_witness (top : Nat) (caps : List Nat)
     exact List.mem_map.mpr ⟨ds, member, rfl⟩
   have hcost := evalCut_le_witness top witness
   have hceil : (evalCut top (tree ds) mask + scale - 1) / scale ≤ (cost + scale - 1) / scale :=
-    Nat.div_le_div_right (by omega)
+    by
+      by_cases hs : scale = 0
+      · simp [hs]
+      · have hp : 0 < scale := by omega
+        have hb : cost + scale - 1 < ((cost + scale - 1) / scale + 1) * scale :=
+          (Nat.div_lt_iff_lt_mul hp).mp (by omega)
+        have ha : evalCut top (tree ds) mask + scale - 1 <
+            ((cost + scale - 1) / scale + 1) * scale := by omega
+        have h := (Nat.div_lt_iff_lt_mul hp).mpr ha
+        omega
   have hm : (evalCut top (tree ds) mask + scale - 1) / scale - aboard ≤
       (cost + scale - 1) / scale - aboard := by omega
   have hmax : max baseMove ((evalCut top (tree ds) mask + scale - 1) / scale - aboard) ≤
