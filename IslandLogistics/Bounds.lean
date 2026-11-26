@@ -6383,3 +6383,215 @@ theorem all_assigned_route_rows_bound (w : World) (r : RouteData) (fmt : RouteFo
 #print axioms trace_route_metric_sum
 #print axioms all_assigned_route_rows_bound
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- The Python subset-convolution masks are indexed by the ordered list
+-- of active parcel IDs, whereas the pickup/held masks use global IDs.
+def localRouteMask (ids : List Nat) (sel : Nat → Bool) : Nat :=
+  predMask ids.length (fun i => sel (ids.getD i 0))
+
+def localRouteContains (ids : List Nat) (mask p : Nat) : Bool :=
+  (List.range ids.length).any (fun i => mask.testBit i && (ids.getD i 0 == p))
+
+theorem local_route_contains (ids : List Nat) (sel : Nat → Bool) (p : Nat) :
+    localRouteContains ids (localRouteMask ids sel) p = true ↔
+      p ∈ ids ∧ sel p = true := by
+  simp only [localRouteContains,List.any_eq_true]
+  constructor
+  · rintro ⟨i,hi,hb⟩
+    have hi' := List.mem_range.mp hi
+    have hh : sel (ids.getD i 0) = true ∧ ids.getD i 0 = p := by
+      simpa [localRouteMask,predMask_testBit,hi'] using hb
+    have he : ids[i] = p := by simpa [hi'] using hh.2
+    exact ⟨List.mem_of_getElem he,by simpa [hh.2] using hh.1⟩
+  · rintro ⟨hp,hs⟩
+    obtain ⟨i,hi,he⟩ := List.getElem_of_mem hp
+    have hd : ids.getD i 0 = p := by simpa [hi] using he
+    exact ⟨i,List.mem_range.mpr hi,by simp [localRouteMask,predMask_testBit,hi,hd,hs]⟩
+
+def routeAssignedMask (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (t : Nat) :=
+  localRouteMask (activeParcels w s) (traceSelector w tr t)
+
+theorem assigned_mask_disjoint (w : World)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (t z i : Nat) (ne : t ≠ z)
+    (ht : (routeAssignedMask w tr t).testBit i = true) :
+    (routeAssignedMask w tr z).testBit i = false := by
+  cases hz : (routeAssignedMask w tr z).testBit i with
+  | false => rfl
+  | true =>
+    have a : i < (activeParcels w s).length ∧
+        traceSelector w tr t ((activeParcels w s).getD i 0) = true := by
+      simpa [routeAssignedMask,localRouteMask,predMask_testBit] using ht
+    have b : i < (activeParcels w s).length ∧
+        traceSelector w tr z ((activeParcels w s).getD i 0) = true := by
+      simpa [routeAssignedMask,localRouteMask,predMask_testBit] using hz
+    have aa : traceDigit w tr ((activeParcels w s).getD i 0) = t := by
+      have h := a.2
+      simp [traceSelector] at h
+      exact h.2
+    have bb : traceDigit w tr ((activeParcels w s).getD i 0) = z := by
+      have h := b.2
+      simp [traceSelector] at h
+      exact h.2
+    exact False.elim (ne (aa.symm.trans bb))
+
+def routeMaskUnion (mask : Nat → Nat) : List Nat → Nat
+  | [] => 0
+  | t::ts => mask t ||| routeMaskUnion mask ts
+
+theorem route_mask_union_bit (mask : Nat → Nat) (ts : List Nat) (i : Nat) :
+    (routeMaskUnion mask ts).testBit i = true ↔
+      ∃ t ∈ ts, (mask t).testBit i = true := by
+  induction ts with
+  | nil => simp [routeMaskUnion]
+  | cons t ts ih =>
+    simp only [routeMaskUnion,Nat.testBit_or,Bool.or_eq_true,ih,List.mem_cons]
+    constructor
+    · rintro (ht | ⟨z,hz,hb⟩)
+      · exact ⟨t,Or.inl rfl,ht⟩
+      · exact ⟨z,Or.inr hz,hb⟩
+    · rintro ⟨z,(rfl | hz),hb⟩
+      · exact Or.inl hb
+      · exact Or.inr ⟨z,hz,hb⟩
+
+theorem route_mask_union_disjoint (mask : Nat → Nat) (ts : List Nat)
+    (t : Nat) (notMem : t ∉ ts)
+    (disj : ∀ t z i, t ≠ z → (mask t).testBit i = true → (mask z).testBit i = false)
+    (i : Nat) (ht : (mask t).testBit i = true) :
+    (routeMaskUnion mask ts).testBit i = false := by
+  cases h : (routeMaskUnion mask ts).testBit i with
+  | false => rfl
+  | true =>
+    obtain ⟨z,hz,hbit⟩ := (route_mask_union_bit mask ts i).mp h
+    have ne : t ≠ z := by intro e; subst z; contradiction
+    have hf := disj t z i ne ht
+    simp [hf] at hbit
+
+theorem or_xor_disjoint (a b : Nat)
+    (disj : ∀ i, a.testBit i = true → b.testBit i = false) :
+    (a ||| b) ^^^ a = b := by
+  apply Nat.eq_of_testBit_eq
+  intro i
+  simp only [Nat.testBit_xor,Nat.testBit_or]
+  cases ha : a.testBit i
+  · simp
+  · simp [disj i ha]
+
+theorem route_allocation_from_masks (mask : Nat → Nat) (row : Nat → Nat → Nat)
+    (ts : List Nat) (distinct : ts.Nodup)
+    (disj : ∀ t z i, t ≠ z → (mask t).testBit i = true → (mask z).testBit i = false) :
+    RouteAllocation (ts.map row) (routeMaskUnion mask ts) ((ts.map (fun t => row t (mask t))).sum) := by
+  induction ts with
+  | nil => exact RouteAllocation.empty
+  | cons t ts ih =>
+    have hd : t ∉ ts ∧ ts.Nodup := by simpa using distinct
+    have hs : maskWithin (mask t) (mask t ||| routeMaskUnion mask ts) := by
+      intro i hi
+      simp [Nat.testBit_or,hi]
+    have hx := or_xor_disjoint (mask t) (routeMaskUnion mask ts)
+      (fun i hi => route_mask_union_disjoint mask ts t hd.1 disj i hi)
+    have tail := ih hd.2
+    have tail' : RouteAllocation (ts.map row) ((mask t ||| routeMaskUnion mask ts) ^^^ mask t)
+        ((ts.map (fun t => row t (mask t))).sum) := by rw [hx]; exact tail
+    have h := RouteAllocation.cons (Nat.le_of_testBit hs) (maskWithin_and hs) tail'
+    simpa [routeMaskUnion,Nat.add_comm] using h
+
+def routeLocalPick (w : World) (s : State) (ids : List Nat) (mask : Nat) :=
+  predMask w.parcels (fun p => localRouteContains ids mask p && isGroundParcel s p)
+
+def routeLocalHeld (w : World) (s : State) (ids : List Nat) (mask : Nat) :=
+  predMask w.parcels (fun p => localRouteContains ids mask p && !isGroundParcel s p)
+
+theorem active_selector_contains (w : World)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (t p : Nat) (hp : p < w.parcels) :
+    localRouteContains (activeParcels w s) (routeAssignedMask w tr t) p =
+      traceSelector w tr t p := by
+  cases hs : traceSelector w tr t p with
+  | false =>
+    cases hc : localRouteContains (activeParcels w s) (routeAssignedMask w tr t) p with
+    | false => rfl
+    | true =>
+      have hh := (local_route_contains (activeParcels w s) (traceSelector w tr t) p).mp hc
+      simp [hs] at hh
+  | true =>
+    have ha : p ∈ activeParcels w s := by
+      have h : s.parcel p ≠ .ground (w.goal p) ∧ traceDigit w tr p = t := by
+        simpa [traceSelector] using hs
+      simp [activeParcels,hp,h.1]
+    exact (local_route_contains (activeParcels w s) (traceSelector w tr t) p).mpr ⟨ha,hs⟩
+
+theorem local_pick_trace_eq (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (t : Nat) :
+    routeLocalPick w s (activeParcels w s) (routeAssignedMask w tr t) = routeInitialPick w tr t := by
+  apply Nat.eq_of_testBit_eq
+  intro p
+  simp only [routeLocalPick,routeInitialPick,predMask_testBit]
+  by_cases hp : p < w.parcels
+  · simp [hp,active_selector_contains w tr t p hp]
+  · simp [hp]
+
+theorem local_held_trace_eq (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (t : Nat) :
+    routeLocalHeld w s (activeParcels w s) (routeAssignedMask w tr t) = routeInitialHeld w tr t := by
+  apply Nat.eq_of_testBit_eq
+  intro p
+  simp only [routeLocalHeld,routeInitialHeld,predMask_testBit]
+  by_cases hp : p < w.parcels
+  · simp [hp,active_selector_contains w tr t p hp]
+  · simp [hp]
+
+-- All retained jobs in the path-induced mask pass the actual vector's
+-- eligibility tests (individual weight and initial owner).
+def routeMaskEligible (w : World) (s : State) (ids : List Nat) (t mask : Nat) : Prop :=
+  ∀ i, i < ids.length → mask.testBit i = true →
+    w.weight (ids.getD i 0) ≤ w.capacity t ∧
+    (jobOwner s (ids.getD i 0) = none ∨ jobOwner s (ids.getD i 0) = some t)
+
+theorem trace_route_mask_eligible (w : World)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) (done : Goal w u)
+    (vp : ValidParcelCarriers w s) (vf : ValidParcelFit w s) (t : Nat) (ht : t < w.trucks) :
+    routeMaskEligible w s (activeParcels w s) t (routeAssignedMask w tr t) := by
+  intro i hi hb
+  let p := (activeParcels w s).getD i 0
+  have he : traceSelector w tr t p = true := by
+    simpa [routeAssignedMask,localRouteMask,predMask_testBit,hi,p] using hb
+  have hp : p ∈ activeParcels w s := by
+    apply List.mem_of_getElem (i := i)
+    simp [p,hi]
+  have hp' : p < w.parcels ∧ s.parcel p ≠ .ground (w.goal p) := by simpa [activeParcels] using hp
+  obtain ⟨a,car,ha,fit,own⟩ := trace_carrier_exists w tr done vp vf p hp'.1 hp'.2
+  have hcar := (trace_selector_owner w tr t ht p he).2.1
+  rw [hcar] at car
+  have eq := Option.some.inj car
+  subst a
+  exact ⟨fit,own⟩
+
+noncomputable def routeVectorEntry (w : World) (r : RouteData) (s : State)
+    (top : Nat) (ids : List Nat) (t mask : Nat) : Nat := by
+  classical
+  exact if routeMaskEligible w s ids t mask then
+    routeRecurrence r (w.capacity t) top (2*r.parcels) (truckVertex s t)
+      (routeLocalPick w s ids mask) (routeLocalHeld w s ids mask)
+    else top
+
+theorem trace_route_vector_entry (w : World) (r : RouteData)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) (done : Goal w u)
+    (vp : ValidParcelCarriers w s) (vf : ValidParcelFit w s) (t : Nat) (ht : t < w.trucks)
+    (top : Nat) :
+    routeVectorEntry w r s top (activeParcels w s) t (routeAssignedMask w tr t) =
+      routeRecurrence r (w.capacity t) top (2*r.parcels) (truckVertex s t)
+        (routeInitialPick w tr t) (routeInitialHeld w tr t) := by
+  unfold routeVectorEntry
+  rw [if_pos (trace_route_mask_eligible w tr done vp vf t ht),local_pick_trace_eq,local_held_trace_eq]
+
+#print axioms local_route_contains
+#print axioms assigned_mask_disjoint
+#print axioms route_allocation_from_masks
+#print axioms trace_route_mask_eligible
+#print axioms trace_route_vector_entry
+end IslandLogistics
