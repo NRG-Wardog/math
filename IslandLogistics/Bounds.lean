@@ -1928,7 +1928,7 @@ theorem binFold_le_member (seed : BinState) (xs : List BinState) (x : BinState)
     rw [List.mem_cons] at h
     rcases h with eq | rest
     · subst x
-      exact binLE_trans (binFold_le_seed _ _) (binMin_right _ _)
+      exact binLE_trans (binFold_le_seed (binMin seed a) as) (binMin_right seed a)
     · exact ih _ rest
 
 inductive RemoveWeight (w : Nat) : List Nat → List Nat → Prop where
@@ -1990,7 +1990,7 @@ theorem binDP_le_next (C : Nat) (seed : BinState) (k : Nat)
   cases xs with
   | nil => cases rem
   | cons a as =>
-    unfold binDP
+    rw [binDP]
     apply binFold_le_member
     apply List.mem_map.mpr
     refine ⟨(w,ys),?_,rfl⟩
