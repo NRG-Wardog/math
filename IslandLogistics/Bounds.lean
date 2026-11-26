@@ -1461,8 +1461,9 @@ theorem held_job_step (w : World) (p t : Nat)
       have ht' : z = t := ParcelPosition.onTruck.inj (hp.symm.trans held)
       subst z
       have e : a = w.goal p := by
-        by_contra ne
-        simp [extraOne, setAt, hp, ne] at safe
+        by_cases e : a = w.goal p
+        · exact e
+        · simp [extraOne, setAt, hp, e] at safe
       subst a
       right
       exact ⟨by simp [setAt], ht, rfl, rfl⟩
@@ -1561,8 +1562,8 @@ theorem ground_first_pickup (w : World) (p source : Nat)
     exact False.elim (unfinished (ParcelPosition.ground.inj (ground.symm.trans done)))
   | @cons s v u a b m h st safe rest ih =>
     rcases ground_job_step w p source st ground with keep | pick
-    · obtain ⟨t,x,y,pm,ph,rm,rh,prefix,load,atSource,held,valid,fit,suffix,hm,hh⟩ := ih keep done
-      exact ⟨t,x,y,a+pm,b+ph,rm,rh,SafeJobPath.cons st safe prefix,
+    · obtain ⟨t,x,y,pm,ph,rm,rh,prepath,load,atSource,held,valid,fit,suffix,hm,hh⟩ := ih keep done
+      exact ⟨t,x,y,a+pm,b+ph,rm,rh,SafeJobPath.cons st safe prepath,
         load,atSource,held,valid,fit,suffix,by omega,by omega⟩
     · obtain ⟨t,held,atSource,valid,fit,hm,hh⟩ := pick
       subst a
@@ -1602,7 +1603,7 @@ theorem flag_false_safe (w : World) (p : Nat)
 theorem extraOne_zero_or_two (w : World) (s u : State) (p : Nat) :
     extraOne w s u p = 0 ∨ extraOne w s u p = 2 := by
   cases hs : s.parcel p <;> cases hu : u.parcel p <;> simp [extraOne,hs,hu]
-  split <;> simp_all
+  exact Classical.em _
 
 def flagCharge (w : World) (flags : Nat → Bool) : Nat :=
   sumN (fun p => if flags p then 2 else 0) w.parcels
@@ -1633,6 +1634,7 @@ theorem flags_cost (w : World)
     rw [sumN_add] at hsum
     unfold flagCharge at *
     unfold extraUnload
+    dsimp only
     omega
 
 #print axioms path_parcel_fit
