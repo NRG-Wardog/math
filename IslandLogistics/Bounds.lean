@@ -242,7 +242,6 @@ theorem project_step (w : World) {s u : State} {m h : Nat}
     (st : Step w s u m h) (p : Nat) : AStep w (project s p) (project u p) m := by
   cases st with
   | drive t a b ht hr valid =>
-    rename_i s
     cases hp : s.parcel p with
     | ground x =>
       simpa [project, parcelVertex, hp] using
@@ -255,7 +254,6 @@ theorem project_step (w : World) {s u : State} {m h : Nat}
       · simpa [project, parcelVertex, hp, truckVertex, setAt, eq] using
           (AStep.stay (w := w) ⟨truckVertex s q, s.ferry⟩ 1)
   | board t f a ht hf hr room valid =>
-    rename_i s
     cases hp : s.parcel p with
     | ground x =>
       simpa [project, parcelVertex, hp] using
@@ -268,7 +266,6 @@ theorem project_step (w : World) {s u : State} {m h : Nat}
       · simpa [project, parcelVertex, hp, truckVertex, setAt, eq] using
           (AStep.stay (w := w) ⟨truckVertex s q, s.ferry⟩ 1)
   | disembark t f ht valid =>
-    rename_i s
     cases hp : s.parcel p with
     | ground x =>
       simpa [project, parcelVertex, hp] using
@@ -281,11 +278,9 @@ theorem project_step (w : World) {s u : State} {m h : Nat}
       · simpa [project, parcelVertex, hp, truckVertex, setAt, eq] using
           (AStep.stay (w := w) ⟨truckVertex s q, s.ferry⟩ 1)
   | sail f b hr hne valid =>
-    rename_i s
     rw [sail_projection]
     exact AStep.sail s.ferry (parcelVertex s p) f b hr hne
   | load q t a hp ht room valid =>
-    rename_i s
     by_cases eq : p = q
     · subst p
       simpa [project, parcelVertex, hp, truckVertex, ht, setAt] using
@@ -293,7 +288,6 @@ theorem project_step (w : World) {s u : State} {m h : Nat}
     · simpa [project, parcelVertex, setAt, eq, truckVertex] using
         (AStep.stay (w := w) (project s p) 0)
   | unload q t a hp ht valid =>
-    rename_i s
     by_cases eq : p = q
     · subst p
       simpa [project, parcelVertex, hp, truckVertex, ht, setAt] using
