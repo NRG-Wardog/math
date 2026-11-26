@@ -1645,3 +1645,209 @@ theorem flags_cost (w : World)
 #print axioms flags_cost
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+def jobOwner (s : State) (p : Nat) : Option Nat :=
+  match s.parcel p with
+  | .ground _ => none
+  | .onTruck t => some t
+
+def concreteJob (w : World) (s : State) (p : Nat) : AssignmentJob :=
+  ⟨w.weight p, jobOwner s p⟩
+
+def selectedJobs (w : World) (s : State) (ids : List Nat) : List AssignmentJob :=
+  ids.map (concreteJob w s)
+
+-- A carrier witness records a genuine segment between pickup/current
+-- carriage and first delivery. All paths are part of the full legal model.
+def RealCarrier (w : World) (p t : Nat) (s u : State) : Prop :=
+  ∃ v x y pm ph cm ch rm rh,
+    Path (Step w) s v pm ph ∧
+    v.parcel p = .onTruck t ∧
+    CarrierSegment w p t v x cm ch ∧
+    Step w x y 0 1 ∧ x.truck t = .land (w.goal p) ∧
+    y.parcel p = .ground (w.goal p) ∧
+    Path (Step w) y u rm rh
+
+theorem path_append_step {S : Type} {edge : S → S → Nat → Nat → Prop}
+    {s u v : S} {m h a b : Nat} (path : Path edge s u m h)
+    (last : edge u v a b) : Path edge s v (m+a) (h+b) := by
+  induction path with
+  | nil s =>
+    simpa using (Path.cons last (Path.nil v))
+  | cons st rest ih =>
+    simpa [Nat.add_assoc] using (Path.cons st (ih last))
+
+theorem real_carrier_from_safe (w : World) (p : Nat)
+    {s u : State} {m h : Nat} (path : SafeJobPath w p s u m h)
+    (hp : p < w.parcels)
+    (active : s.parcel p ≠ .ground (w.goal p))
+    (done : Goal w u) (vp : ValidParcelCarriers w s)
+    (vf : ValidParcelFit w s) :
+    ∃ t, t < w.trucks ∧ w.weight p ≤ w.capacity t ∧
+      (jobOwner s p = none ∨ jobOwner s p = some t) ∧
+      RealCarrier w p t s u := by
+  cases initial : s.parcel p with
+  | ground a =>
+    have ha : a ≠ w.goal p := by
+      intro e
+      exact active (by simpa [e] using initial)
+    obtain ⟨t,x,y,pm,ph,rm,rh,pre,ld,atSource,held,valid,fit,suf,hm,hh⟩ :=
+      ground_first_pickup w p a path initial ha (done p hp)
+    obtain ⟨x2,y2,cm,ch,rm2,rh2,seg,un,atGoal,delivered,suffix,hm2,hh2⟩ :=
+      held_first_delivery w p t suf held (done p hp)
+    refine ⟨t,valid,fit,Or.inl (by simp [jobOwner,initial]),?_⟩
+    exact ⟨y,x2,y2,pm+0,ph+1,cm,ch,rm2,rh2,
+      path_append_step (safe_job_is_path w p pre) ld,held,seg,
+      un,atGoal,delivered,suffix⟩
+  | onTruck t =>
+    obtain ⟨x,y,cm,ch,rm,rh,seg,un,atGoal,delivered,suffix,hm,hh⟩ :=
+      held_first_delivery w p t path initial (done p hp)
+    exact ⟨t,vp p hp t initial,vf p hp t initial,
+      Or.inr (by simp [jobOwner,initial]),
+      s,x,y,0,0,cm,ch,rm,rh,Path.nil s,initial,seg,un,atGoal,delivered,suffix⟩
+
+-- DirectCutAssignments enumerates exactly one digit per active parcel.
+-- A flagged parcel is assigned the omission digit; an unflagged parcel
+-- receives the carrier extracted from its own concrete path.
+inductive PathAssignment (w : World) (s u : State) (flags : Nat → Bool) :
+    List Nat → List Nat → Prop where
+  | nil : PathAssignment w s u flags [] []
+  | omit {p ps ds} : flags p = true → PathAssignment w s u flags ps ds →
+      PathAssignment w s u flags (p::ps) (w.trucks::ds)
+  | keep {p ps ds t} :
+      flags p = false → t < w.trucks → w.weight p ≤ w.capacity t →
+      (jobOwner s p = none ∨ jobOwner s p = some t) →
+      RealCarrier w p t s u → PathAssignment w s u flags ps ds →
+      PathAssignment w s u flags (p::ps) (t::ds)
+
+theorem path_assignment_exists (w : World) {s u : State} {m h e : Nat}
+    {flags : Nat → Bool} (path : FlaggedPath w s u m h e flags)
+    (done : Goal w u) (vp : ValidParcelCarriers w s)
+    (vf : ValidParcelFit w s) (ids : List Nat)
+    (valid : ∀ p ∈ ids, p < w.parcels ∧ s.parcel p ≠ .ground (w.goal p)) :
+    ∃ ds, PathAssignment w s u flags ids ds := by
+  induction ids with
+  | nil => exact ⟨[],PathAssignment.nil⟩
+  | cons p ps ih =>
+    obtain ⟨hp,active⟩ := valid p (by simp)
+    obtain ⟨ds,tail⟩ := ih (fun q hq => valid q (List.mem_cons_of_mem _ hq))
+    cases flag : flags p with
+    | false =>
+      obtain ⟨t,ht,fit,owner,carrier⟩ :=
+        real_carrier_from_safe w p (flag_false_safe w p path flag) hp active done vp vf
+      exact ⟨t::ds,PathAssignment.keep flag ht fit owner carrier tail⟩
+    | true => exact ⟨w.trucks::ds,PathAssignment.omit flag tail⟩
+
+theorem path_assignment_valid (w : World) (s u : State) (flags : Nat → Bool)
+    (caps : List Nat) (cl : caps.length = w.trucks)
+    (cv : ∀ t, t < w.trucks → caps.getD t 0 = w.capacity t)
+    {ids ds : List Nat} (pa : PathAssignment w s u flags ids ds) :
+    ds.length = ids.length ∧
+    (∀ d ∈ ds, d < caps.length+1) ∧
+    admissibleDigits caps (selectedJobs w s ids) ds = true ∧
+    omittedPenalty w.trucks ds =
+      (ids.map (fun p => if flags p then 2 else 0)).sum := by
+  induction pa with
+  | nil => simp [selectedJobs,admissibleDigits,omittedPenalty]
+  | @omit p ps ds flag tail ih =>
+    obtain ⟨hl,hv,hf,he⟩ := ih
+    constructor
+    · simp [hl]
+    constructor
+    · intro d hd
+      rw [List.mem_cons] at hd
+      rcases hd with eq | h
+      · subst d; omega
+      · exact hv d h
+    constructor
+    · simp [selectedJobs,admissibleDigits,admissibleDigit,cl]
+      simpa [selectedJobs] using hf
+    · simp [omittedPenalty,flag,he]
+  | @keep p ps ds t flag ht fit owner carrier tail ih =>
+    obtain ⟨hl,hv,hf,he⟩ := ih
+    constructor
+    · simp [hl]
+    constructor
+    · intro d hd
+      rw [List.mem_cons] at hd
+      rcases hd with eq | h
+      · subst d; omega
+      · exact hv d h
+    constructor
+    · have digit : admissibleDigit caps (concreteJob w s p) t = true := by
+        have hn : t ≠ caps.length := by omega
+        have hlt : t < caps.length := by omega
+        rcases owner with own | own
+        · simp [admissibleDigit,concreteJob,hn,hlt,cv t ht,fit,own]
+        · simp [admissibleDigit,concreteJob,hn,hlt,cv t ht,fit,own]
+      change admissibleDigit caps (concreteJob w s p) t &&
+        admissibleDigits caps (selectedJobs w s ps) ds = true
+      simp [digit,hf]
+    · have hn : t ≠ w.trucks := by omega
+      simp [omittedPenalty,flag,he,hn]
+
+-- The list of actually active parcels is a filter of range. Its charged
+-- flags cannot exceed the total concrete residual budget.
+def activeParcels (w : World) (s : State) : List Nat :=
+  (List.range w.parcels).filter (fun p => s.parcel p != .ground (w.goal p))
+
+theorem sum_range_eq_sumN (f : Nat → Nat) (n : Nat) :
+    ((List.range n).map f).sum = sumN f n := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    rw [List.range_succ,List.map_append,List.sum_append]
+    simp [sumN,ih]
+
+theorem filtered_weight_le (xs : List Nat) (keep : Nat → Bool) (f : Nat → Nat) :
+    ((xs.filter keep).map f).sum ≤ (xs.map f).sum := by
+  induction xs with
+  | nil => simp
+  | cons x xs ih =>
+    cases h : keep x <;> simp [h] <;> omega
+
+theorem active_flags_cost (w : World) (s : State) (flags : Nat → Bool) :
+    ((activeParcels w s).map (fun p => if flags p then 2 else 0)).sum ≤
+      flagCharge w flags := by
+  have h := filtered_weight_le (List.range w.parcels)
+    (fun p => s.parcel p != .ground (w.goal p)) (fun p => if flags p then 2 else 0)
+  rw [sum_range_eq_sumN] at h
+  exact h
+
+-- The full assignment enumeration is now linked to the actual legal path
+-- and to its real handling cost. It does not hypothesize that a valid
+-- column exists; this theorem constructs and proves one exists.
+theorem legal_path_assignment_column (w : World) {s u : State} {m h e : Nat}
+    (path : ResidualPath w s u m h e) (done : Goal w u)
+    (vp : ValidParcelCarriers w s) (vf : ValidParcelFit w s)
+    (caps : List Nat) (cl : caps.length = w.trucks)
+    (cv : ∀ t, t < w.trucks → caps.getD t 0 = w.capacity t) :
+    ∃ ds flags,
+      FlaggedPath w s u m h e flags ∧
+      PathAssignment w s u flags (activeParcels w s) ds ∧
+      ds ∈ assignmentColumns caps (selectedJobs w s (activeParcels w s)) ∧
+      handling w s + omittedPenalty caps.length ds ≤ h := by
+  obtain ⟨flags,flagpath⟩ := flags_from_residual w path
+  have valid : ∀ p ∈ activeParcels w s,
+      p < w.parcels ∧ s.parcel p ≠ .ground (w.goal p) := by
+    intro p hp
+    simpa [activeParcels] using hp
+  obtain ⟨ds,pa⟩ := path_assignment_exists w flagpath done vp vf _ valid
+  obtain ⟨hl,hv,hf,he⟩ := path_assignment_valid w s u flags caps cl cv pa
+  have col := assignment_column_complete caps (selectedJobs w s (activeParcels w s)) ds
+    (by simpa [selectedJobs] using hl) hv hf
+  have hc := active_flags_cost w s flags
+  have hb := flags_cost w flagpath
+  have hh := residual_goal_budget w path done
+  refine ⟨ds,flags,flagpath,pa,col,?_⟩
+  rw [cl,he]
+  omega
+
+#print axioms real_carrier_from_safe
+#print axioms path_assignment_exists
+#print axioms path_assignment_valid
+#print axioms legal_path_assignment_column
+end IslandLogistics
