@@ -2851,3 +2851,220 @@ theorem concrete_visit_cut_profile_bound (w : World) (side : Nat → Bool)
 #print axioms concrete_visit_cut_profile_bound
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+def sideDelta (side : Nat → Bool) (a b : Nat) : Nat :=
+  if side a = side b then 0 else 1
+
+def truckFlux (w : World) (side : Nat → Bool) (s u : State) : Nat :=
+  (enteringTrucks w side s u).length + (leavingTrucks w side s u).length
+
+theorem truckFlux_sum (w : World) (side : Nat → Bool) (s u : State) :
+    truckFlux w side s u =
+      sumN (fun t => sideDelta side (physicalTruck s t) (physicalTruck u t)) w.trucks := by
+  simp only [truckFlux,leavingTrucks,enteringTrucks,filtered_count_eq_sum,← sumN_add]
+  apply sumN_congr
+  intro t ht
+  cases hs : side (physicalTruck s t) <;>
+    cases hu : side (physicalTruck u t) <;> simp [sideDelta,hs,hu]
+
+theorem sumN_single (f : Nat → Nat) (n t : Nat) (ht : t < n)
+    (hf : ∀ q, q < n → q ≠ t → f q = 0) :
+    sumN f n = f t := by
+  induction n with
+  | zero => omega
+  | succ n ih =>
+    by_cases he : t = n
+    · subst t
+      have hz : sumN f n = 0 := by
+        have h := sumN_congr f (fun _ => 0) n (fun q hq => hf q (by omega) (by omega))
+        rw [h,sumN_zero]
+      simp [sumN,hz]
+    · have h := ih (by omega) (fun q hq neq => hf q (by omega) neq)
+      have h0 := hf n (by omega) (by omega)
+      simp [sumN,h,h0]
+
+-- For each actual DRIVE, at most one selected true bridge cut changes
+-- sides. All usable ferry routes stay within a side of each such cut.
+-- These are graph properties, not claims about a heuristic or optimum.
+structure RoadCutSystem (w : World) where
+  cuts : List (Nat → Bool)
+  road : ∀ a b, w.road a b → (cuts.map (fun side => sideDelta side a b)).sum ≤ 1
+  ferry : ∀ side ∈ cuts, ∀ f a b, 0 < w.slots f →
+    w.route f a → w.route f b → side a = side b
+
+theorem step_drive_flux (w : World) (side : Nat → Bool)
+    (s : State) (t a b : Nat) (ht : s.truck t = .land a) (valid : t < w.trucks) :
+    truckFlux w side s {s with truck := setAt s.truck t (.land b)} = sideDelta side a b := by
+  rw [truckFlux_sum]
+  rw [sumN_single _ _ t valid (by
+    intro q hq ne
+    simp [physicalTruck,setAt,ne,sideDelta])]
+  simp [physicalTruck,ht,setAt]
+
+theorem flux_zero_of_same_side (w : World) (side : Nat → Bool) (s u : State)
+    (h : ∀ t, t < w.trucks → side (physicalTruck s t) = side (physicalTruck u t)) :
+    truckFlux w side s u = 0 := by
+  rw [truckFlux_sum]
+  have eq := sumN_congr (fun t => sideDelta side (physicalTruck s t) (physicalTruck u t))
+    (fun _ => 0) w.trucks (fun t ht => by simp [sideDelta,h t ht])
+  rw [eq,sumN_zero]
+
+theorem sum_map_eq_zero {α : Type} (xs : List α) (f : α → Nat)
+    (h : ∀ x ∈ xs, f x = 0) : (xs.map f).sum = 0 := by
+  induction xs with
+  | nil => rfl
+  | cons x xs ih => simp [h x (by simp),ih (fun y hy => h y (List.mem_cons_of_mem _ hy))]
+
+theorem sum_map_eq_on {α : Type} (xs : List α) (f g : α → Nat)
+    (h : ∀ x ∈ xs, f x = g x) : (xs.map f).sum = (xs.map g).sum := by
+  induction xs with
+  | nil => rfl
+  | cons x xs ih => simp [h x (by simp),ih (fun y hy => h y (List.mem_cons_of_mem _ hy))]
+
+theorem step_road_cut_budget (w : World) (sys : RoadCutSystem w)
+    {s u : State} {m h : Nat} (st : Step w s u m h)
+    (vf : ValidFerries w s) (vt : ValidTruckCarriers w s) :
+    (sys.cuts.map (fun side => truckFlux w side s u)).sum ≤ m := by
+  cases st with
+  | drive t a b ht hr valid =>
+    rw [sum_map_eq_on sys.cuts _ (fun side => sideDelta side a b)
+      (fun side _ => step_drive_flux w side s t a b ht valid.1)]
+    exact sys.road a b hr
+  | board t f a ht hf hr room valid =>
+    rw [sum_map_eq_zero sys.cuts _ (by
+      intro side hside
+      apply flux_zero_of_same_side
+      intro q hq
+      by_cases eq : q = t
+      · subst q; simp [physicalTruck,ht,hf,setAt]
+      · simp [physicalTruck,setAt,eq])]
+    omega
+  | disembark t f ht valid =>
+    rw [sum_map_eq_zero sys.cuts _ (by
+      intro side hside
+      apply flux_zero_of_same_side
+      intro q hq
+      by_cases eq : q = t
+      · subst q; simp [physicalTruck,ht,setAt]
+      · simp [physicalTruck,setAt,eq])]
+    omega
+  | sail f b hr hne valid =>
+    rw [sum_map_eq_zero sys.cuts _ (by
+      intro side hside
+      apply flux_zero_of_same_side
+      intro q hq
+      cases he : s.truck q with
+      | land a => simp [physicalTruck,he]
+      | onFerry g =>
+        by_cases eq : g = f
+        · subst g
+          have hk := vt q hq f he
+          simpa [physicalTruck,he,setAt] using
+            sys.ferry side hside f (s.ferry f) b hk.2 (vf f hk.1) hr
+        · simp [physicalTruck,he,setAt,eq])]
+    omega
+  | load p t a hp ht room valid =>
+    rw [sum_map_eq_zero sys.cuts _ (fun side _ =>
+      flux_zero_of_same_side w side _ _ (fun _ _ => rfl))]
+    omega
+  | unload p t a hp ht valid =>
+    rw [sum_map_eq_zero sys.cuts _ (fun side _ =>
+      flux_zero_of_same_side w side _ _ (fun _ _ => rfl))]
+    omega
+
+-- Reified legal trace, so crossing counts for ALL cuts are measured
+-- on the same concrete completion, not different existential paths.
+inductive LegalTrace (w : World) : State → State → Nat → Nat → Type where
+  | nil (s : State) : LegalTrace w s s 0 0
+  | cons {s v u : State} {a b m h : Nat} :
+    Step w s v a b → LegalTrace w v u m h → LegalTrace w s u (a+m) (b+h)
+
+theorem trace_from_path (w : World) {s u : State} {m h : Nat}
+    (p : Path (Step w) s u m h) : Nonempty (LegalTrace w s u m h) := by
+  induction p with
+  | nil s => exact ⟨LegalTrace.nil s⟩
+  | cons st tail ih =>
+    obtain ⟨tr⟩ := ih
+    exact ⟨LegalTrace.cons st tr⟩
+
+def traceIn (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} : LegalTrace w s u m h → Nat
+  | .nil _ => 0
+  | @LegalTrace.cons _ s v u a b m h st tail =>
+    (enteringTrucks w side s v).length + traceIn w side tail
+
+def traceOut (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} : LegalTrace w s u m h → Nat
+  | .nil _ => 0
+  | @LegalTrace.cons _ s v u a b m h st tail =>
+    (leavingTrucks w side s v).length + traceOut w side tail
+
+theorem trace_flux_path (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) :
+    FluxPath w side s u m h (traceIn w side tr) (traceOut w side tr) := by
+  induction tr with
+  | nil s => exact FluxPath.nil s
+  | cons st tail ih => exact FluxPath.cons st ih
+
+theorem sum_map_add_nat {α : Type} (xs : List α) (f g : α → Nat) :
+    (xs.map (fun x => f x + g x)).sum = (xs.map f).sum + (xs.map g).sum := by
+  induction xs with
+  | nil => rfl
+  | cons x xs ih => simp [ih]; omega
+
+theorem sum_map_le {α : Type} (xs : List α) (f g : α → Nat)
+    (h : ∀ x ∈ xs, f x ≤ g x) : (xs.map f).sum ≤ (xs.map g).sum := by
+  induction xs with
+  | nil => rfl
+  | cons x xs ih =>
+    have hx := h x (by simp)
+    have hh := ih (fun y hy => h y (List.mem_cons_of_mem _ hy))
+    simp; omega
+
+theorem trace_road_cut_budget (w : World) (sys : RoadCutSystem w)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (vf : ValidFerries w s) (vt : ValidTruckCarriers w s) :
+    (sys.cuts.map (fun side => traceIn w side tr + traceOut w side tr)).sum ≤ m := by
+  induction tr with
+  | nil s => simp [traceIn,traceOut,sum_map_eq_zero]
+  | @cons s v u a b m h st tail ih =>
+    have hb := step_road_cut_budget w sys st vf vt
+    have ht := ih (step_valid_ferries w st vf) (step_valid_truck_carriers w st vt)
+    rw [sum_map_eq_on sys.cuts _
+      (fun side => truckFlux w side s v + (traceIn w side tail + traceOut w side tail))
+      (by intro side hs; simp [truckFlux,traceIn,traceOut]; omega)]
+    rw [sum_map_add_nat]
+    omega
+
+noncomputable def independentCutCost (w : World) (side : Nat → Bool)
+    (s : State) (C : Nat) (seed : BinState) : Nat :=
+  let I := visitInward w side s C seed
+  let O := visitInward w (fun a => !side a) s C seed
+  let k := cutStockCount w side s
+  max (I+O) (max (2*I-(w.trucks-k)) (2*O-k))
+
+-- Actual theorem for the sum of independent true-road-bridge profiles,
+-- including the forced visits. Every legal path supplies the witness.
+theorem road_cut_sum_admissible (w : World) (sys : RoadCutSystem w)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (vf : ValidFerries w s) (vt : ValidTruckCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C) (seed : BinState) :
+    handling w s + (sys.cuts.map (fun side => independentCutCost w side s C seed)).sum ≤ m+h := by
+  obtain ⟨tr⟩ := trace_from_path w path
+  have hb := trace_road_cut_budget w sys tr vf vt
+  have hs : (sys.cuts.map (fun side => independentCutCost w side s C seed)).sum ≤
+      (sys.cuts.map (fun side => traceIn w side tr + traceOut w side tr)).sum := by
+    apply sum_map_le
+    intro side hside
+    exact (concrete_visit_cut_profile_bound w side (trace_flux_path w side tr) done vl vp C cap seed).2
+  have hhandling := handling_path w path done
+  omega
+
+#print axioms step_road_cut_budget
+#print axioms trace_road_cut_budget
+#print axioms road_cut_sum_admissible
+end IslandLogistics
