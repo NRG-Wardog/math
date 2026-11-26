@@ -7537,3 +7537,129 @@ theorem passenger_exact_cycle (vs : List Nat) (edges : List (Nat × Nat))
 #print axioms passenger_orbit_cycle
 #print axioms passenger_exact_cycle
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- The cycle traversal stops at the first visit to the job's destination,
+-- just as the Python loop increments the cyclic index until i == j.
+def passengerPrefix (next : Nat → Nat) (goal : Nat) : Nat → Nat → List (Nat × Nat)
+  | 0, _ => []
+  | n+1, a => if a = goal then [] else (a,next a)::passengerPrefix next goal n (next a)
+
+theorem passenger_prefix_subset (edges : List (Nat × Nat)) (next : Nat → Nat)
+    (unique : ∀ a b, (a,b) ∈ edges → next a = b)
+    {a b : Nat} {path : List (Nat × Nat)} (walk : PassengerWalk edges a b path)
+    (fuel : Nat) :
+    ∀ e ∈ passengerPrefix next b fuel a, e ∈ path := by
+  induction walk generalizing fuel with
+  | nil a =>
+    cases fuel <;> simp [passengerPrefix]
+  | @cons a b c tail edge walk ih =>
+    cases fuel with
+    | zero => simp [passengerPrefix]
+    | succ n =>
+      by_cases eq : a = c
+      · simp [passengerPrefix,eq]
+      · intro e he
+        simp only [passengerPrefix,if_neg eq,unique a b edge,List.mem_cons] at he
+        rcases he with he | ht
+        · exact List.mem_cons.mpr (Or.inl he)
+        · exact List.mem_cons.mpr (Or.inr (ih n e ht))
+
+theorem passenger_prefix_walk (edges : List (Nat × Nat)) (next : Nat → Nat)
+    (vs : List Nat) (real : ∀ a ∈ vs, (a,next a) ∈ edges)
+    (closed : ∀ a ∈ vs, next a ∈ vs) (a b fuel : Nat) (ha : a ∈ vs)
+    (reach : ∃ k, k ≤ fuel ∧ rideIter next k a = b) :
+    PassengerWalk edges a b (passengerPrefix next b fuel a) := by
+  induction fuel generalizing a with
+  | zero =>
+    obtain ⟨k,hk,he⟩ := reach
+    have hz : k = 0 := by omega
+    subst k
+    have he' : a = b := he
+    subst b
+    exact PassengerWalk.nil a
+  | succ n ih =>
+    by_cases e : a = b
+    · subst b
+      simpa [passengerPrefix] using (PassengerWalk.nil (edges := edges) a)
+    · rw [passengerPrefix,if_neg e]
+      apply PassengerWalk.cons (real a ha)
+      apply ih (next a) (closed a ha)
+      obtain ⟨k,hk,he⟩ := reach
+      cases k with
+      | zero => exact False.elim (e he)
+      | succ k => exact ⟨k,by omega,he⟩
+
+structure PassengerJobs where
+  count : Nat
+  source : Nat → Nat
+  goal : Nat → Nat
+  weight : Nat → Nat
+
+noncomputable def passengerArcLoad (jobs : PassengerJobs) (paths : Nat → List (Nat × Nat))
+    (edge : Nat × Nat) : Nat :=
+  sumN (fun p => if edge ∈ paths p then jobs.weight p else 0) jobs.count
+
+theorem passenger_prefix_capacity (vs : List Nat) (edges : List (Nat × Nat))
+    (jobs : PassengerJobs) (paths : Nat → List (Nat × Nat))
+    (walks : ∀ p, p < jobs.count → PassengerWalk edges (jobs.source p) (jobs.goal p) (paths p))
+    (next : Nat → Nat) (unique : ∀ a b, (a,b) ∈ edges → next a = b)
+    (C : Nat) (cap : ∀ e ∈ edges, passengerArcLoad jobs paths e ≤ C)
+    (e : Nat × Nat) (he : e ∈ edges) :
+    passengerArcLoad jobs (fun p => passengerPrefix next (jobs.goal p) vs.length (jobs.source p)) e ≤ C := by
+  apply Nat.le_trans _ (cap e he)
+  unfold passengerArcLoad
+  apply sumN_mono
+  intro p hp
+  by_cases hm : e ∈ passengerPrefix next (jobs.goal p) vs.length (jobs.source p)
+  · have hp' := passenger_prefix_subset edges next unique (walks p hp) vs.length e hm
+    simp [hm,hp']
+  · simp [hm]
+
+def PassengerCycleFeasible (vs : List Nat) (jobs : PassengerJobs) (C root : Nat) : Prop :=
+  ∃ next : Nat → Nat,
+    List.Perm (rideOrbit next root vs.length) vs ∧
+    rideIter next vs.length root = root ∧
+    ∀ a ∈ vs, passengerArcLoad jobs
+      (fun p => passengerPrefix next (jobs.goal p) vs.length (jobs.source p)) (a,next a) ≤ C
+
+noncomputable def passengerCycleLower (vs : List Nat) (jobs : PassengerJobs) (C root : Nat) : Nat := by
+  classical
+  exact if PassengerCycleFeasible vs jobs C root then vs.length else vs.length+1
+
+-- For the equality case, the manifest premise is per actual ride:
+-- there is exactly one outgoing ride per island, so directed-arc IDs
+-- are unique. No capacity assumption for aggregated parallel arcs
+-- is required in the larger-ride case.
+theorem passenger_cycle_lower_admissible (vs : List Nat) (edges : List (Nat × Nat))
+    (nd : vs.Nodup) (size : 2 ≤ vs.length) (strong : PassengerStrong vs edges)
+    (jobs : PassengerJobs) (paths : Nat → List (Nat × Nat))
+    (walks : ∀ p, p < jobs.count → PassengerWalk edges (jobs.source p) (jobs.goal p) (paths p))
+    (C root : Nat) (hr : root ∈ vs)
+    (manifest : edges.length = vs.length → ∀ e ∈ edges, passengerArcLoad jobs paths e ≤ C) :
+    passengerCycleLower vs jobs C root ≤ edges.length := by
+  have hc := passenger_count_lower vs edges nd size strong
+  unfold passengerCycleLower
+  split
+  · exact hc
+  · rename_i infeasible
+    by_cases eq : edges.length = vs.length
+    · obtain ⟨next,unique,real,perm,period⟩ := passenger_exact_cycle vs edges nd size strong eq root hr
+      exact False.elim (infeasible ⟨next,perm,period,fun a ha =>
+        passenger_prefix_capacity vs edges jobs paths walks next unique C (manifest eq) _ (real a ha)⟩)
+    · omega
+
+-- Converting the ride-count bound to the three action budgets.
+theorem passenger_cycle_action_budget (L rides B D S slots aboard : Nat)
+    (bound : L ≤ rides) (disembark : rides ≤ D) (balance : D ≤ B+aboard)
+    (sails : rides ≤ S*slots) (positive : 0 < slots) :
+    L ≤ D ∧ L-aboard ≤ B ∧ (L+slots-1)/slots ≤ S := by
+  exact ⟨by omega,by omega,ceil_lower L slots S positive (by omega)⟩
+
+#print axioms passenger_prefix_subset
+#print axioms passenger_prefix_capacity
+#print axioms passenger_cycle_lower_admissible
+#print axioms passenger_cycle_action_budget
+end IslandLogistics
