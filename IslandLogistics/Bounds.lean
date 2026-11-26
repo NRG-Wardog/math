@@ -1088,3 +1088,229 @@ theorem ordinary_budget_admissible (w : World) {s u : State} {m a : Nat}
 #print axioms ordinary_budget_admissible
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+/-! Executable finite assignment enumeration and min-plus recurrence.
+The code below verifies the actual least-significant-digit enumeration used
+by DirectCutAssignments.assignment and the witness inequality of the
+subset-min/merge recurrence. The concrete extraction of all geometric
+witnesses and NumPy refinement remain separate obligations. -/
+
+def encodeDigits (base : Nat) : List Nat → Nat
+  | [] => 0
+  | d :: ds => d + base * encodeDigits base ds
+
+def decodeDigits (base : Nat) : Nat → Nat → List Nat
+  | 0, _ => []
+  | n+1, z => (z % base) :: decodeDigits base n (z / base)
+
+theorem radix_head (b d x : Nat) (hd : d < b) :
+    (d + b*x) % b = d := by
+  rw [Nat.add_mul_mod_self_left, Nat.mod_eq_of_lt hd]
+
+theorem radix_tail (b d x : Nat) (hd : d < b) :
+    (d + b*x) / b = x := by
+  rw [Nat.add_mul_div_left d x (by omega), Nat.div_eq_of_lt hd, Nat.zero_add]
+
+theorem digit_code_bound (base : Nat) (ds : List Nat)
+    (valid : ∀ d ∈ ds, d < base) :
+    encodeDigits base ds < base ^ ds.length := by
+  induction ds with
+  | nil => simp [encodeDigits]
+  | cons d ds ih =>
+    have hd := valid d (by simp)
+    have ht := ih (fun x hx => valid x (List.mem_cons_of_mem d hx))
+    simp only [encodeDigits, List.length_cons, Nat.pow_succ]
+    have hm := Nat.mul_le_mul_left base (show encodeDigits base ds + 1 ≤ base^ds.length by omega)
+    rw [Nat.mul_add, Nat.mul_one] at hm
+    rw [Nat.mul_comm (base^ds.length) base]
+    omega
+
+theorem decode_encoded_digits (base : Nat) (ds : List Nat)
+    (valid : ∀ d ∈ ds, d < base) :
+    decodeDigits base ds.length (encodeDigits base ds) = ds := by
+  induction ds with
+  | nil => rfl
+  | cons d ds ih =>
+    have hd := valid d (by simp)
+    have ht := ih (fun x hx => valid x (List.mem_cons_of_mem d hx))
+    simp only [List.length_cons, encodeDigits, decodeDigits]
+    rw [radix_head _ _ _ hd, radix_tail _ _ _ hd, ht]
+
+structure AssignmentJob where
+  weight : Nat
+  owner : Option Nat
+
+def admissibleDigit (caps : List Nat) (job : AssignmentJob) (d : Nat) : Bool :=
+  d == caps.length ||
+    (decide (d < caps.length) && decide (job.weight ≤ caps.getD d 0) &&
+      (job.owner.isNone || job.owner == some d))
+
+def admissibleDigits (caps : List Nat) : List AssignmentJob → List Nat → Bool
+  | [], [] => true
+  | j :: js, d :: ds => admissibleDigit caps j d && admissibleDigits caps js ds
+  | _, _ => false
+
+def assignmentColumns (caps : List Nat) (jobs : List AssignmentJob) : List (List Nat) :=
+  ((List.range ((caps.length+1)^jobs.length)).map
+    (decodeDigits (caps.length+1) jobs.length)).filter (admissibleDigits caps jobs)
+
+theorem assignment_column_complete (caps : List Nat) (jobs : List AssignmentJob)
+    (digits : List Nat) (hl : digits.length = jobs.length)
+    (hv : ∀ d ∈ digits, d < caps.length+1)
+    (hf : admissibleDigits caps jobs digits = true) :
+    digits ∈ assignmentColumns caps jobs := by
+  unfold assignmentColumns
+  apply List.mem_filter.mpr
+  refine ⟨?_, hf⟩
+  apply List.mem_map.mpr
+  refine ⟨encodeDigits (caps.length+1) digits, ?_, ?_⟩
+  · apply List.mem_range.mpr
+    rw [← hl]
+    exact digit_code_bound _ _ hv
+  · rw [← hl]
+    exact decode_encoded_digits _ _ hv
+
+def omittedPenalty (T : Nat) : List Nat → Nat
+  | [] => 0
+  | d :: ds => (if d = T then 2 else 0) + omittedPenalty T ds
+
+theorem omitted_penalty_exact (T : Nat) (digits : List Nat) :
+    omittedPenalty T digits = 2 * digits.count T := by
+  induction digits with
+  | nil => rfl
+  | cons d ds ih =>
+    by_cases e : d = T
+    · subst d
+      simp [omittedPenalty, ih, Nat.mul_add]
+      omega
+    · have ne : T ≠ d := Ne.symm e
+      simp [omittedPenalty, ih, e, ne]
+
+-- A binary-mask column is eligible precisely when it is a submask.
+-- This enumerator equals the mathematical range/filter definition used
+-- to build self.subsets in the Python constructor.
+def submaskColumns (mask : Nat) : List Nat :=
+  (List.range (mask+1)).filter (fun j => (j &&& mask) == j)
+
+theorem submask_column_complete (mask j : Nat) (h : j ≤ mask)
+    (hs : j &&& mask = j) : j ∈ submaskColumns mask := by
+  simp [submaskColumns, hs, show j < mask+1 by omega]
+
+-- Literal min-plus entries: merge computes the minimum over all
+-- disjoint allocations represented by (mask xor submask, submask).
+def mergeValue (top : Nat) (left right : Nat → Nat) (mask : Nat) : Nat :=
+  minCandidate top ((submaskColumns mask).map (fun j => left (mask ^^^ j) + right j))
+
+theorem mergeValue_witness (top : Nat) (left right : Nat → Nat) (mask j : Nat)
+    (h : j ≤ mask) (hs : j &&& mask = j) :
+    mergeValue top left right mask ≤ left (mask ^^^ j) + right j := by
+  apply minCandidate_le_member
+  exact List.mem_map.mpr ⟨j, submask_column_complete mask j h hs, rfl⟩
+
+def subsetMinValue (top : Nat) (row : Nat → Nat) (mask : Nat) : Nat :=
+  minCandidate top ((submaskColumns mask).map row)
+
+theorem subsetMinValue_witness (top : Nat) (row : Nat → Nat) (mask j : Nat)
+    (h : j ≤ mask) (hs : j &&& mask = j) :
+    subsetMinValue top row mask ≤ row j := by
+  apply minCandidate_le_member
+  exact List.mem_map.mpr ⟨j, submask_column_complete mask j h hs, rfl⟩
+
+-- A syntax tree for exactly the operations of the scalar cut DP.
+-- Each edge row is indexed by its permitted terminal truck set.
+-- Relax is subset_min; split is merge; repeat charges a chain of
+-- equal profiles after contraction; leaf permits unused endpoints.
+inductive CutDP where
+  | leaf
+  | addEdge : (Nat → Nat) → CutDP → CutDP
+  | relax : CutDP → CutDP
+  | split : CutDP → CutDP → CutDP
+  | repeat : Nat → (Nat → Nat) → CutDP → CutDP
+
+def evalCut (top : Nat) : CutDP → Nat → Nat
+  | .leaf, _ => 0
+  | .addEdge edge child, mask => edge mask + evalCut top child mask
+  | .relax child, mask => subsetMinValue top (evalCut top child) mask
+  | .split left right, mask => mergeValue top (evalCut top left) (evalCut top right) mask
+  | .repeat n edge child, mask => n * edge mask + evalCut top child mask
+
+-- A concrete assignment of endpoint masks at every DP operation.
+-- Costs here are built from the actual row functions, not postulated
+-- admissibility of a computed minimum.
+inductive CutWitness : CutDP → Nat → Nat → Prop where
+  | leaf (mask : Nat) : CutWitness .leaf mask 0
+  | addEdge {edge child mask cost} :
+      CutWitness child mask cost →
+      CutWitness (.addEdge edge child) mask (edge mask + cost)
+  | relax {child mask sub cost} :
+      sub ≤ mask → sub &&& mask = sub →
+      CutWitness child sub cost → CutWitness (.relax child) mask cost
+  | split {left right mask sub lcost rcost} :
+      sub ≤ mask → sub &&& mask = sub →
+      CutWitness left (mask ^^^ sub) lcost → CutWitness right sub rcost →
+      CutWitness (.split left right) mask (lcost + rcost)
+  | repeat {n edge child mask cost} :
+      CutWitness child mask cost →
+      CutWitness (.repeat n edge child) mask (n*edge mask + cost)
+
+theorem evalCut_le_witness (top : Nat) {tree mask cost}
+    (witness : CutWitness tree mask cost) : evalCut top tree mask ≤ cost := by
+  induction witness with
+  | leaf mask => simp [evalCut]
+  | addEdge hw ih =>
+    simp only [evalCut]
+    omega
+  | relax hm hs hw ih =>
+    exact Nat.le_trans (subsetMinValue_witness _ _ _ _ hm hs) ih
+  | split hm hs hleft hright il ir =>
+    apply Nat.le_trans (mergeValue_witness _ _ _ _ _ hm hs)
+    omega
+  | repeat hw ih =>
+    simp only [evalCut]
+    omega
+
+-- This combines the actual enumerator with the concrete cut DP witness.
+-- The extra cost of omitted jobs is not guessed: the preceding
+-- residual_goal_budget theorem bounds it by non-goal unloads.
+def assignmentCutBound (top : Nat) (caps : List Nat) (jobs : List AssignmentJob)
+    (baseMove scale aboard mask : Nat) (tree : List Nat → CutDP) : Nat :=
+  minCandidate top ((assignmentColumns caps jobs).map (fun ds =>
+    omittedPenalty caps.length ds +
+      max baseMove ((evalCut top (tree ds) mask + scale - 1) / scale - aboard)))
+
+theorem assignmentCutBound_le_witness (top : Nat) (caps : List Nat)
+    (jobs : List AssignmentJob) (baseMove scale aboard mask : Nat)
+    (tree : List Nat → CutDP) (ds : List Nat) (cost : Nat)
+    (hl : ds.length = jobs.length) (hv : ∀ d ∈ ds, d < caps.length+1)
+    (hf : admissibleDigits caps jobs ds = true)
+    (witness : CutWitness (tree ds) mask cost) :
+    assignmentCutBound top caps jobs baseMove scale aboard mask tree ≤
+      omittedPenalty caps.length ds + max baseMove ((cost+scale-1)/scale-aboard) := by
+  have member := assignment_column_complete caps jobs ds hl hv hf
+  have hmin : assignmentCutBound top caps jobs baseMove scale aboard mask tree ≤
+      omittedPenalty caps.length ds +
+        max baseMove ((evalCut top (tree ds) mask + scale - 1) / scale - aboard) := by
+    apply minCandidate_le_member
+    exact List.mem_map.mpr ⟨ds, member, rfl⟩
+  have hcost := evalCut_le_witness top witness
+  have hceil : (evalCut top (tree ds) mask + scale - 1) / scale ≤ (cost + scale - 1) / scale :=
+    Nat.div_le_div_right (by omega)
+  have hm : (evalCut top (tree ds) mask + scale - 1) / scale - aboard ≤
+      (cost + scale - 1) / scale - aboard := by omega
+  have hmax : max baseMove ((evalCut top (tree ds) mask + scale - 1) / scale - aboard) ≤
+      max baseMove ((cost + scale - 1) / scale - aboard) := by
+    apply Nat.max_le.mpr
+    exact ⟨Nat.le_max_left _ _, Nat.le_trans hm (Nat.le_max_right _ _)⟩
+  omega
+
+#print axioms digit_code_bound
+#print axioms decode_encoded_digits
+#print axioms assignment_column_complete
+#print axioms omitted_penalty_exact
+#print axioms mergeValue_witness
+#print axioms subsetMinValue_witness
+#print axioms evalCut_le_witness
+#print axioms assignmentCutBound_le_witness
+end IslandLogistics
