@@ -573,3 +573,125 @@ theorem contract_sails (w : World) (s : State) (f b c : Nat)
 #print axioms delay_sail
 #print axioms contract_sails
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Extra charge for a physical UNLOAD outside a parcel's own goal.
+-- This is exactly the 2-unit residual charged by the geographic
+-- patterns (a projected non-goal is necessarily a real non-goal).
+def extraOne (w : World) (s u : State) (p : Nat) : Nat :=
+  match s.parcel p, u.parcel p with
+  | .onTruck _, .ground a => if a = w.goal p then 0 else 2
+  | _, _ => 0
+
+def extraUnload (w : World) (s u : State) : Nat :=
+  sumN (extraOne w s u) w.parcels
+
+theorem sumN_add (f g : Nat → Nat) (n : Nat) :
+    sumN (fun q => f q + g q) n = sumN f n + sumN g n := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    simp only [sumN, ih]
+    omega
+
+theorem extra_same (w : World) (s u : State) (p : Nat)
+    (he : s.parcel p = u.parcel p) :
+    extraOne w s u p = 0 := by
+  unfold extraOne
+  rw [he]
+  cases u.parcel p <;> rfl
+
+theorem residual_same (w : World) (s u : State) (p : Nat)
+    (he : s.parcel p = u.parcel p) :
+    handleOne w s p + extraOne w s u p = handleOne w u p := by
+  rw [extra_same w s u p he, Nat.add_zero]
+  simp only [handleOne, he]
+
+theorem residual_unchanged (w : World) (s u : State)
+    (he : s.parcel = u.parcel) :
+    handling w s + extraUnload w s u ≤ 0 + handling w u := by
+  unfold handling extraUnload
+  rw [← sumN_add, Nat.zero_add]
+  have h := sumN_congr
+    (fun q => handleOne w s q + extraOne w s u q)
+    (handleOne w u) w.parcels
+    (fun q _ => residual_same w s u q (congrFun he q))
+  rw [h]
+
+theorem residual_step (w : World) {s u : State} {m h : Nat}
+    (st : Step w s u m h) :
+    handling w s + extraUnload w s u ≤ h + handling w u := by
+  cases st with
+  | drive t a b ht hr valid => exact residual_unchanged w _ _ rfl
+  | board t f a ht hf hr room valid => exact residual_unchanged w _ _ rfl
+  | disembark t f ht valid => exact residual_unchanged w _ _ rfl
+  | sail f b hr hne valid => exact residual_unchanged w _ _ rfl
+  | load p t a hp ht room valid =>
+    unfold handling extraUnload
+    rw [← sumN_add]
+    apply sumN_one_change (p := p)
+    · intro q neq
+      apply residual_same
+      simp [setAt, neq]
+    · simp [handleOne, extraOne, hp, setAt]
+      split <;> omega
+  | unload p t a hp ht valid =>
+    unfold handling extraUnload
+    rw [← sumN_add]
+    apply sumN_one_change (p := p)
+    · intro q neq
+      apply residual_same
+      simp [setAt, neq]
+    · simp [handleOne, extraOne, hp, setAt]
+      split <;> omega
+
+-- The index e is the actual sum of non-goal unloading charges along the
+-- path, not an assumed bound on the true optimum.
+inductive ResidualPath (w : World) : State → State → Nat → Nat → Nat → Prop where
+  | nil (s : State) : ResidualPath w s s 0 0 0
+  | cons {s t u : State} {a b m h e : Nat} :
+      Step w s t a b → ResidualPath w t u m h e →
+      ResidualPath w s u (a + m) (b + h) (extraUnload w s t + e)
+
+theorem residual_path_budget (w : World) {s u : State} {m h e : Nat}
+    (p : ResidualPath w s u m h e) :
+    handling w s + e ≤ h + handling w u := by
+  induction p with
+  | nil s => simp
+  | cons st rest ih =>
+    have he := residual_step w st
+    omega
+
+theorem residual_goal_budget (w : World) {s u : State} {m h e : Nat}
+    (p : ResidualPath w s u m h e) (g : Goal w u) :
+    handling w s + e ≤ h := by
+  have he := residual_path_budget w p
+  rw [handling_goal w u g, Nat.add_zero] at he
+  exact he
+
+theorem residual_path_is_path (w : World) {s u : State} {m h e : Nat}
+    (p : ResidualPath w s u m h e) : Path (Step w) s u m h := by
+  induction p with
+  | nil s => exact Path.nil _
+  | cons step rest ih => exact Path.cons step ih
+
+-- Each candidate route/assignment has a handling penalty. It is enough
+-- that there exists the witness induced by the actual completion.
+-- This arithmetic theorem does not assert that the Python DP finds it.
+theorem transfer_witness_combine (handling0 movement routeCost extraCost
+    r m h candidate : Nat)
+    (hm : movement ≤ m) (hr : routeCost + extraCost ≤ m)
+    (hh : handling0 + 2*r ≤ h)
+    (hc : candidate ≤ 2*r + max movement (routeCost + extraCost)) :
+    handling0 + candidate ≤ m + h := by
+  have hm' : max movement (routeCost + extraCost) ≤ m :=
+    max_bound _ _ _ hm hr
+  omega
+
+#print axioms residual_step
+#print axioms residual_path_budget
+#print axioms residual_goal_budget
+#print axioms transfer_witness_combine
+end IslandLogistics
