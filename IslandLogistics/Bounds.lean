@@ -107,3 +107,208 @@ theorem paired_capacity_bound (I O oddI oddO C pairs : Nat)
 #print axioms crossing_pair_form
 #print axioms paired_capacity_bound
 end IslandLogistics
+
+
+namespace IslandLogistics
+-- Functional representation of the tuple encoding in the implementation.
+-- Finite index bounds and capacity checks are part of the transition rules.
+inductive TruckPosition where
+  | land : Nat → TruckPosition
+  | onFerry : Nat → TruckPosition
+  deriving DecidableEq
+
+inductive ParcelPosition where
+  | ground : Nat → ParcelPosition
+  | onTruck : Nat → ParcelPosition
+  deriving DecidableEq
+
+structure World where
+  locations : Nat
+  trucks : Nat
+  ferries : Nat
+  parcels : Nat
+  road : Nat → Nat → Prop
+  route : Nat → Nat → Prop
+  capacity : Nat → Nat
+  slots : Nat → Nat
+  weight : Nat → Nat
+  goal : Nat → Nat
+
+structure State where
+  truck : Nat → TruckPosition
+  ferry : Nat → Nat
+  parcel : Nat → ParcelPosition
+
+def setAt {α : Type} (f : Nat → α) (i : Nat) (v : α) : Nat → α :=
+  fun j => if j = i then v else f j
+
+def sumN (f : Nat → Nat) : Nat → Nat
+  | 0 => 0
+  | n+1 => sumN f n + f n
+
+def load (w : World) (s : State) (t : Nat) : Nat :=
+  sumN (fun p => if s.parcel p = .onTruck t then w.weight p else 0) w.parcels
+
+def occupancy (w : World) (s : State) (f : Nat) : Nat :=
+  sumN (fun t => if s.truck t = .onFerry f then 1 else 0) w.trucks
+
+def Goal (w : World) (s : State) : Prop :=
+  ∀ p, p < w.parcels → s.parcel p = .ground (w.goal p)
+
+-- Cost indices split movement and handling (sum equals actual action cost).
+inductive Step (w : World) : State → State → Nat → Nat → Prop where
+  | drive (s : State) (t a b : Nat)
+      (ht : s.truck t = .land a) (hr : w.road a b)
+      (valid : t < w.trucks ∧ a < w.locations ∧ b < w.locations) :
+      Step w s {s with truck := setAt s.truck t (.land b)} 1 0
+  | board (s : State) (t f a : Nat)
+      (ht : s.truck t = .land a) (hf : s.ferry f = a) (hr : w.route f a)
+      (room : occupancy w s f < w.slots f)
+      (valid : t < w.trucks ∧ f < w.ferries ∧ a < w.locations) :
+      Step w s {s with truck := setAt s.truck t (.onFerry f)} 1 0
+  | disembark (s : State) (t f : Nat)
+      (ht : s.truck t = .onFerry f) (valid : t < w.trucks ∧ f < w.ferries) :
+      Step w s {s with truck := setAt s.truck t (.land (s.ferry f))} 1 0
+  | sail (s : State) (f b : Nat)
+      (hr : w.route f b) (hne : s.ferry f ≠ b)
+      (valid : f < w.ferries ∧ b < w.locations) :
+      Step w s {s with ferry := setAt s.ferry f b} 3 0
+  | load (s : State) (p t a : Nat)
+      (hp : s.parcel p = .ground a) (ht : s.truck t = .land a)
+      (room : load w s t + w.weight p ≤ w.capacity t)
+      (valid : p < w.parcels ∧ t < w.trucks ∧ a < w.locations) :
+      Step w s {s with parcel := setAt s.parcel p (.onTruck t)} 0 1
+  | unload (s : State) (p t a : Nat)
+      (hp : s.parcel p = .onTruck t) (ht : s.truck t = .land a)
+      (valid : p < w.parcels ∧ t < w.trucks ∧ a < w.locations) :
+      Step w s {s with parcel := setAt s.parcel p (.ground a)} 0 1
+
+inductive Vertex where
+  | ground : Nat → Vertex
+  | aboard : Nat → Nat → Vertex
+  deriving DecidableEq
+
+structure Projection where
+  vertex : Vertex
+  ferry : Nat → Nat
+
+def truckVertex (s : State) (t : Nat) : Vertex :=
+  match s.truck t with
+  | .land a => .ground a
+  | .onFerry f => .aboard f (s.ferry f)
+
+def parcelVertex (s : State) (p : Nat) : Vertex :=
+  match s.parcel p with
+  | .ground a => .ground a
+  | .onTruck t => truckVertex s t
+
+def project (s : State) (p : Nat) : Projection :=
+  ⟨parcelVertex s p, s.ferry⟩
+
+def sailVertex (v : Vertex) (f b : Nat) : Vertex :=
+  match v with
+  | .ground a => .ground a
+  | .aboard g a => if g = f then .aboard g b else .aboard g a
+
+-- Exact one-vehicle movement abstraction with all ferry coordinates retained.
+-- Capacity, other trucks and package handling are relaxed.
+inductive AStep (w : World) : Projection → Projection → Nat → Prop where
+  | stay (x : Projection) (c : Nat) : AStep w x x c
+  | drive (cfg : Nat → Nat) (a b : Nat) (hr : w.road a b) :
+      AStep w ⟨.ground a, cfg⟩ ⟨.ground b, cfg⟩ 1
+  | board (cfg : Nat → Nat) (f : Nat) :
+      AStep w ⟨.ground (cfg f), cfg⟩ ⟨.aboard f (cfg f), cfg⟩ 1
+  | disembark (cfg : Nat → Nat) (f : Nat) :
+      AStep w ⟨.aboard f (cfg f), cfg⟩ ⟨.ground (cfg f), cfg⟩ 1
+  | sail (cfg : Nat → Nat) (v : Vertex) (f b : Nat)
+      (hr : w.route f b) (hne : cfg f ≠ b) :
+      AStep w ⟨v, cfg⟩ ⟨sailVertex v f b, setAt cfg f b⟩ 3
+
+theorem sail_projection (s : State) (p f b : Nat) :
+    project {s with ferry := setAt s.ferry f b} p =
+      ⟨sailVertex (parcelVertex s p) f b, setAt s.ferry f b⟩ := by
+  cases hp : s.parcel p with
+  | ground a => simp [project, parcelVertex, hp, sailVertex]
+  | onTruck t =>
+    cases ht : s.truck t with
+    | land a => simp [project, parcelVertex, hp, truckVertex, ht, sailVertex]
+    | onFerry g =>
+      by_cases eq : g = f
+      · subst g
+        simp [project, parcelVertex, hp, truckVertex, ht, sailVertex, setAt]
+      · simp [project, parcelVertex, hp, truckVertex, ht, sailVertex, setAt, eq]
+
+theorem project_step (w : World) {s u : State} {m h : Nat}
+    (st : Step w s u m h) (p : Nat) : AStep w (project s p) (project u p) m := by
+  cases st with
+  | drive s t a b ht hr valid =>
+    cases hp : s.parcel p with
+    | ground x =>
+      simpa [project, parcelVertex, hp] using
+        (AStep.stay (w := w) ⟨Vertex.ground x, s.ferry⟩ 1)
+    | onTruck q =>
+      by_cases eq : q = t
+      · subst q
+        simpa [project, parcelVertex, hp, truckVertex, ht, setAt] using
+          (AStep.drive (w := w) s.ferry a b hr)
+      · simpa [project, parcelVertex, hp, truckVertex, setAt, eq] using
+          (AStep.stay (w := w) ⟨truckVertex s q, s.ferry⟩ 1)
+  | board s t f a ht hf hr room valid =>
+    cases hp : s.parcel p with
+    | ground x =>
+      simpa [project, parcelVertex, hp] using
+        (AStep.stay (w := w) ⟨Vertex.ground x, s.ferry⟩ 1)
+    | onTruck q =>
+      by_cases eq : q = t
+      · subst q
+        simpa [project, parcelVertex, hp, truckVertex, ht, setAt, hf] using
+          (AStep.board (w := w) s.ferry f)
+      · simpa [project, parcelVertex, hp, truckVertex, setAt, eq] using
+          (AStep.stay (w := w) ⟨truckVertex s q, s.ferry⟩ 1)
+  | disembark s t f ht valid =>
+    cases hp : s.parcel p with
+    | ground x =>
+      simpa [project, parcelVertex, hp] using
+        (AStep.stay (w := w) ⟨Vertex.ground x, s.ferry⟩ 1)
+    | onTruck q =>
+      by_cases eq : q = t
+      · subst q
+        simpa [project, parcelVertex, hp, truckVertex, ht, setAt] using
+          (AStep.disembark (w := w) s.ferry f)
+      · simpa [project, parcelVertex, hp, truckVertex, setAt, eq] using
+          (AStep.stay (w := w) ⟨truckVertex s q, s.ferry⟩ 1)
+  | sail s f b hr hne valid =>
+    rw [sail_projection]
+    exact AStep.sail s.ferry (parcelVertex s p) f b hr hne
+  | load s q t a hp ht room valid =>
+    by_cases eq : p = q
+    · subst p
+      simpa [project, parcelVertex, hp, truckVertex, ht, setAt] using
+        (AStep.stay (w := w) ⟨Vertex.ground a, s.ferry⟩ 0)
+    · simpa [project, parcelVertex, setAt, eq, truckVertex] using
+        (AStep.stay (w := w) (project s p) 0)
+  | unload s q t a hp ht valid =>
+    by_cases eq : p = q
+    · subst p
+      simpa [project, parcelVertex, hp, truckVertex, ht, setAt] using
+        (AStep.stay (w := w) ⟨Vertex.ground a, s.ferry⟩ 0)
+    · simpa [project, parcelVertex, setAt, eq, truckVertex] using
+        (AStep.stay (w := w) (project s p) 0)
+
+-- A graph-edge certificate is a finite data obligation, not an assumption
+-- of admissibility or a statement about optimal plans.
+theorem single_parcel_bound (w : World) (p : Nat) (hp : p < w.parcels)
+    (d : Projection → Nat)
+    (edgeCertificate : ∀ x y c, AStep w x y c → d x ≤ c + d y)
+    (goalCertificate : ∀ cfg, d ⟨.ground (w.goal p), cfg⟩ = 0)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h)
+    (goal : Goal w u) : d (project s p) ≤ m := by
+  have hh := potential_bound (fun s => d (project s p))
+    (fun s t a b st => edgeCertificate _ _ _ (project_step w st p)) path
+  have hz : d (project u p) = 0 := by
+    simpa [project, parcelVertex, goal p hp] using goalCertificate u.ferry
+  omega
+
+#print axioms project_step
+#print axioms single_parcel_bound
+end IslandLogistics
