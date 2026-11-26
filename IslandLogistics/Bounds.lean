@@ -5477,3 +5477,136 @@ theorem direct_compressed_road_admissible (w : World) (sys : RoadCutSystem w)
 
 #print axioms direct_compressed_road_admissible
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Explicit domain of the course INIT format, before any legal actions.
+def InitialGroundFormat (w : World) (s : State) : Prop :=
+  (∀ t, t < w.trucks → ∃ a, a < w.locations ∧ s.truck t = .land a) ∧
+  (∀ p, p < w.parcels → ∃ a, a < w.locations ∧ s.parcel p = .ground a) ∧
+  ValidFerries w s
+
+structure CarrierInvariant (w : World) (s : State) : Prop where
+  loads : ValidTruckLoad w s
+  parcels : ValidParcelCarriers w s
+  fit : ValidParcelFit w s
+  occupancy : ValidFerryOccupancy w s
+  ferries : ValidFerries w s
+  trucks : ValidTruckCarriers w s
+
+theorem init_carrier_invariant (w : World) (s : State) (fmt : InitialGroundFormat w s) :
+    CarrierInvariant w s := by
+  have loadZero : ∀ t, load w s t = 0 := by
+    intro t
+    unfold load
+    rw [sumN_congr _ (fun _ => 0) _ (by
+      intro p hp
+      obtain ⟨a,ha,he⟩ := fmt.2.1 p hp
+      simp [he]),sumN_zero]
+  have occZero : ∀ f, occupancy w s f = 0 := by
+    intro f
+    unfold occupancy
+    rw [sumN_congr _ (fun _ => 0) _ (by
+      intro t ht
+      obtain ⟨a,ha,he⟩ := fmt.1 t ht
+      simp [he]),sumN_zero]
+  have noParcel : ∀ p, p < w.parcels → ∀ t, s.parcel p ≠ .onTruck t := by
+    intro p hp t h
+    obtain ⟨a,ha,he⟩ := fmt.2.1 p hp
+    rw [he] at h
+    cases h
+  have noTruck : ∀ t, t < w.trucks → ∀ f, s.truck t ≠ .onFerry f := by
+    intro t ht f h
+    obtain ⟨a,ha,he⟩ := fmt.1 t ht
+    rw [he] at h
+    cases h
+  exact {
+    loads := fun t _ => by rw [loadZero t]; exact Nat.zero_le _
+    parcels := fun p hp t h => False.elim (noParcel p hp t h)
+    fit := fun p hp t h => False.elim (noParcel p hp t h)
+    occupancy := fun f _ => by rw [occZero f]; exact Nat.zero_le _
+    ferries := fmt.2.2
+    trucks := fun t ht f h => False.elim (noTruck t ht f h)
+  }
+
+theorem step_carrier_invariant (w : World) {s u : State} {m h : Nat}
+    (st : Step w s u m h) (v : CarrierInvariant w s) : CarrierInvariant w u :=
+  ⟨step_valid_load w st v.loads,step_valid_parcel_carriers w st v.parcels,
+    step_parcel_fit w st v.fit,step_valid_occupancy w st v.occupancy,
+    step_valid_ferries w st v.ferries,step_valid_truck_carriers w st v.trucks⟩
+
+theorem path_carrier_invariant (w : World) {s u : State} {m h : Nat}
+    (path : Path (Step w) s u m h) (v : CarrierInvariant w s) : CarrierInvariant w u := by
+  induction path with
+  | nil s => exact v
+  | cons st tail ih => exact ih (step_carrier_invariant w st v)
+
+def ReachableFrom (w : World) (init s : State) : Prop :=
+  ∃ m h, Path (Step w) init s m h
+
+theorem reachable_carrier_invariant (w : World) (init s : State)
+    (fmt : InitialGroundFormat w init) (reach : ReachableFrom w init s) :
+    CarrierInvariant w s := by
+  obtain ⟨m,h,p⟩ := reach
+  exact path_carrier_invariant w p (init_carrier_invariant w init fmt)
+
+-- Admissibility is expressed against EVERY legal completion, not only
+-- the successors kept by the submitted search implementation.
+def AdmissibleOnReachable (w : World) (init : State) (estimate : State → Nat) : Prop :=
+  ∀ s, ReachableFrom w init s → ∀ u m h, Path (Step w) s u m h →
+    Goal w u → estimate s ≤ m+h
+
+noncomputable def geographicEstimate (w : World) (sys : RoadCutSystem w)
+    (gs : List (GeoTable w)) (C : Nat) (seed : BinState) (s : State) : Nat :=
+  handling w s + (gs.map (fun g => geoValue g s)).sum +
+    (sys.cuts.map (fun side => independentCutCost w side s C seed)).sum
+
+-- This is the universal path inequality for the modeled geographic
+-- branch, conditional only on the stated STATIC contraction, disjoint
+-- charging, and LOCAL Bellman table certificates. It is not a theorem
+-- that Python's constructor always generates those certificates.
+theorem geographic_reachable_admissible (w : World) (init : State)
+    (fmt : InitialGroundFormat w init)
+    (sys : RoadCutSystem w) (gs : List (GeoTable w)) (disjoint : GeoDisjoint w sys gs)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C) (seed : BinState) :
+    AdmissibleOnReachable w init (geographicEstimate w sys gs C seed) := by
+  intro s reach u m h path done
+  have v := reachable_carrier_invariant w init s fmt reach
+  exact geographic_portfolio_admissible w sys gs disjoint path done
+    v.loads v.parcels v.occupancy v.ferries v.trucks C cap seed
+
+def weightedEstimate (w : World) (mass : Nat → Nat) (limit scale : Nat)
+    (l : WeightedLabels w) (s : State) : Nat :=
+  handling w s + (weightedValue w mass l s + limit*scale-1)/(limit*scale)
+
+theorem weighted_reachable_admissible (w : World) (init : State)
+    (fmt : InitialGroundFormat w init) (mass : Nat → Nat) (limit scale : Nat)
+    (rule : MassRule w mass limit) (l : WeightedLabels w) (den : 0 < limit*scale)
+    (hd : l.drivePrice ≤ scale) (hb : l.boardPrice ≤ scale)
+    (hs : ∀ f, f < w.ferries → w.slots f * l.sailPrice f ≤ 3*scale) :
+    AdmissibleOnReachable w init (weightedEstimate w mass limit scale l) := by
+  intro s reach u m h path done
+  have v := reachable_carrier_invariant w init s fmt reach
+  exact weighted_transport_admissible w mass limit scale rule l den hd hb hs
+    path done v.loads v.parcels v.occupancy v.ferries
+
+-- The minimum completion cost is specified without assuming existence
+-- for unreachable goals or asserting any optimization property of A*.
+def OptimalCompletion (w : World) (s : State) (cost : Nat) : Prop :=
+  (∃ u m h, Path (Step w) s u m h ∧ Goal w u ∧ cost = m+h) ∧
+  (∀ u m h, Path (Step w) s u m h → Goal w u → cost ≤ m+h)
+
+theorem admissible_le_optimum (w : World) (init : State) (estimate : State → Nat)
+    (adm : AdmissibleOnReachable w init estimate)
+    (s : State) (reach : ReachableFrom w init s) (cost : Nat)
+    (opt : OptimalCompletion w s cost) : estimate s ≤ cost := by
+  obtain ⟨u,m,h,p,g,hc⟩ := opt.1
+  rw [hc]
+  exact adm s reach u m h p g
+
+#print axioms reachable_carrier_invariant
+#print axioms geographic_reachable_admissible
+#print axioms weighted_reachable_admissible
+#print axioms admissible_le_optimum
+end IslandLogistics
