@@ -3390,3 +3390,104 @@ theorem assigned_visit_bin_bound (w : World) (side : Nat → Bool) (t : Nat)
 #print axioms assigned_visit_inside_required
 #print axioms assigned_visit_bin_bound
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+def truckSide (side : Nat → Bool) (s : State) (t : Nat) : Nat :=
+  if side (physicalTruck s t) then 1 else 0
+
+theorem truck_step_balance (side : Nat → Bool) (t : Nat) (s v : State) :
+    truckIn side t s v + truckSide side s t =
+      truckIn (fun x => !side x) t s v + truckSide side v t := by
+  cases h1 : side (physicalTruck s t) <;> cases h2 : side (physicalTruck v t) <;>
+    simp [truckIn,truckSide,h1,h2]
+
+theorem trace_truck_balance (w : World) (side : Nat → Bool) (t : Nat)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) :
+    traceTruckIn w side t tr + truckSide side s t =
+      traceTruckIn w (fun x => !side x) t tr + truckSide side u t := by
+  induction tr with
+  | nil s => simp [traceTruckIn]
+  | @cons s v u a b m h st tail ih =>
+    have hh := truck_step_balance side t s v
+    simp only [traceTruckIn]
+    omega
+
+theorem trace_in_sum_trucks (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) :
+    traceIn w side tr = sumN (fun t => traceTruckIn w side t tr) w.trucks := by
+  induction tr with
+  | nil s => simp [traceIn,traceTruckIn,sumN_zero]
+  | @cons s v u a b m h st tail ih =>
+    simp only [traceIn,traceTruckIn,enteringTrucks,filtered_count_eq_sum]
+    rw [sumN_add,← ih]
+    rfl
+
+theorem trace_out_as_complement (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) :
+    traceOut w side tr = traceIn w (fun x => !side x) tr := by
+  induction tr with
+  | nil s => rfl
+  | cons st tail ih => simp [traceOut,traceIn,leavingTrucks,ih]
+
+-- max(I_t,O_t+delta_t), where negative O_t+delta_t is harmless:
+-- I_t is already nonnegative. Nat subtraction represents this clamp.
+noncomputable def requiredInForFinal (w : World) (side : Nat → Bool)
+    (s u : State) (t : Nat) (sel : Nat → Bool) (seed : BinState) : Nat :=
+  max (assignedVisitInward w side s t sel seed)
+    (assignedVisitInward w (fun x => !side x) s t sel seed +
+      truckSide side u t - truckSide side s t)
+
+theorem required_in_for_final_bound (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (t : Nat) (ht : t < w.trucks) (sel : Nat → Bool)
+    (owners : ∀ p, p < w.parcels → sel p = true →
+      s.parcel p ≠ .ground (w.goal p) ∧ traceCarrier w tr p = some t ∧ traceSafe w tr p)
+    (seed : BinState) :
+    requiredInForFinal w side s u t sel seed ≤ traceTruckIn w side t tr := by
+  have hi := assigned_visit_bin_bound w side t tr done vl vp ht sel owners seed
+  have ho := assigned_visit_bin_bound w (fun x => !side x) t tr done vl vp ht sel owners seed
+  have hb := trace_truck_balance w side t tr
+  unfold requiredInForFinal
+  omega
+
+-- The complete arithmetic of the Python DirectCutAssignments.profile
+-- crossing count, BEFORE tree-edge costs / special ferry inventory.
+-- Selectors describe the retained direct jobs of each truck.
+noncomputable def directPhysicalProfile (w : World) (side : Nat → Bool)
+    (s u : State) (C : Nat) (sel : Nat → Nat → Bool) (seed : BinState) : Int :=
+  let delta : Int := (cutStockCount w side u : Int) - cutStockCount w side s
+  let x := sumN (fun t => requiredInForFinal w side s u t (sel t) seed) w.trucks
+  let I := visitInward w side s C seed
+  let O := visitInward w (fun a => !side a) s C seed
+  max (2*(x : Int)-delta) (max (2*(I : Int)-delta) (2*(O : Int)+delta))
+
+theorem concrete_direct_profile_bound (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (sel : Nat → Nat → Bool)
+    (owners : ∀ t, t < w.trucks → ∀ p, p < w.parcels → sel t p = true →
+      s.parcel p ≠ .ground (w.goal p) ∧ traceCarrier w tr p = some t ∧ traceSafe w tr p)
+    (seed : BinState) :
+    directPhysicalProfile w side s u C sel seed ≤
+      (traceIn w side tr : Int) + traceOut w side tr := by
+  have hx := sumN_mono
+    (fun t => requiredInForFinal w side s u t (sel t) seed)
+    (fun t => traceTruckIn w side t tr) w.trucks
+    (fun t ht => required_in_for_final_bound w side tr done vl vp t ht (sel t) (owners t ht) seed)
+  rw [← trace_in_sum_trucks w side tr] at hx
+  have path := trace_flux_path w side tr
+  have hb := path_flux_balance w side path
+  have hi := visit_inward_bound w side path done vl vp C cap seed
+  have ho := visit_inward_bound w (fun a => !side a) (flux_complement w side path) done vl vp C cap seed
+  unfold directPhysicalProfile
+  dsimp only
+  omega
+
+#print axioms trace_truck_balance
+#print axioms trace_in_sum_trucks
+#print axioms concrete_direct_profile_bound
+end IslandLogistics
