@@ -1018,3 +1018,73 @@ theorem reachable_stock_eq (w : World) (c : ComponentLabels w)
 #print axioms reachable_stock_eq
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Exact per-truck crossing formula used by the coupled cut DP.
+-- The premise is the actual crossing balance, not admissibility.
+theorem coupled_cross_profile (I O i o delta : Int)
+    (hI : I ≤ i) (hO : O ≤ o) (balance : i - o = delta) :
+    2 * max I (O + delta) - delta ≤ i + o := by
+  have h : max I (O + delta) ≤ i := by
+    apply Int.max_le.mpr
+    exact ⟨hI, by omega⟩
+  omega
+
+theorem aggregate_cross_profile (I O i o delta : Int)
+    (hI : I ≤ i) (hO : O ≤ o) (balance : i - o = delta) :
+    max (2*I-delta) (2*O+delta) ≤ i+o := by
+  apply Int.max_le.mpr
+  constructor <;> omega
+
+def minCandidate (fallback : Nat) : List Nat → Nat
+  | [] => fallback
+  | x :: xs => min x (minCandidate fallback xs)
+
+theorem minCandidate_le_member (fallback : Nat) (xs : List Nat) (x : Nat)
+    (hx : x ∈ xs) : minCandidate fallback xs ≤ x := by
+  induction xs with
+  | nil => simp at hx
+  | cons y ys ih =>
+    rw [List.mem_cons] at hx
+    rcases hx with h | h
+    · subst y
+      exact Nat.min_le_left _ _
+    · exact (Nat.min_le_right _ _).trans (ih h)
+
+-- Source-level route/cut assignment composition. The witness is the
+-- particular retained-job assignment induced by a legal path. The
+-- separate obligation that the executable enumerates this witness is
+-- intentionally not hidden in the theorem statement.
+theorem route_witness_admissible (w : World) {s u : State} {m a e : Nat}
+    (p : ResidualPath w s u m a e) (g : Goal w u)
+    (move route extra r fallback : Nat) (xs : List Nat)
+    (hm : move ≤ m) (hr : route + extra ≤ m) (he : 2*r ≤ e)
+    (member : 2*r + max move (route + extra) ∈ xs) :
+    handling w s + minCandidate fallback xs ≤ m + a := by
+  have hh := residual_goal_budget w p g
+  have hmin := minCandidate_le_member fallback xs _ member
+  have hmax := max_bound move (route+extra) m hm hr
+  omega
+
+theorem geographic_budget_admissible (w : World) {s u : State} {m a e : Nat}
+    (p : ResidualPath w s u m a e) (g : Goal w u) (geo : Nat)
+    (hgeo : geo ≤ m + e) :
+    handling w s + geo ≤ m + a := by
+  have hh := residual_goal_budget w p g
+  omega
+
+theorem ordinary_budget_admissible (w : World) {s u : State} {m a : Nat}
+    (p : Path (Step w) s u m a) (g : Goal w u) (movement : Nat)
+    (hm : movement ≤ m) : handling w s + movement ≤ m + a := by
+  have hh := handling_path w p g
+  omega
+
+#print axioms coupled_cross_profile
+#print axioms aggregate_cross_profile
+#print axioms route_witness_admissible
+#print axioms geographic_budget_admissible
+#print axioms ordinary_budget_admissible
+
+end IslandLogistics
