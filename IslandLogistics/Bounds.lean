@@ -7052,3 +7052,186 @@ theorem hetero_extra_le_packing (w : World) (C : Nat) (seed : BinState)
 #print axioms net_packing_bin_lower
 #print axioms hetero_extra_le_packing
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- RoadProjection: two Lipschitz coordinates share the same DRIVE budget.
+theorem paired_coordinate_budget (dx dy : Int)
+    (hx : -1 ≤ dx ∧ dx ≤ 1) (hy : -1 ≤ dy ∧ dy ≤ 1) :
+    (dx+dy).natAbs + (dx-dy).natAbs ≤ 2 := by
+  by_cases ha : 0 ≤ dx+dy
+  · have h1 := Int.natAbs_of_nonneg ha
+    by_cases hb : 0 ≤ dx-dy
+    · have h2 := Int.natAbs_of_nonneg hb
+      omega
+    · have h2 := Int.ofNat_natAbs_of_nonpos (show dx-dy ≤ 0 by omega)
+      omega
+  · have h1 := Int.ofNat_natAbs_of_nonpos (show dx+dy ≤ 0 by omega)
+    by_cases hb : 0 ≤ dx-dy
+    · have h2 := Int.natAbs_of_nonneg hb
+      omega
+    · have h2 := Int.ofNat_natAbs_of_nonpos (show dx-dy ≤ 0 by omega)
+      omega
+
+structure ProjectionCut where
+  side : Nat → Bool
+  gap : Nat
+
+def projectionNested : List ProjectionCut → Prop
+  | [] => True
+  | c::cs => (∀ d ∈ cs, ∀ a, d.side a = true → c.side a = true) ∧
+    projectionNested cs
+
+theorem projection_stock_mono (w : World) (s : State) (a b : Nat → Bool)
+    (h : ∀ x, a x = true → b x = true) :
+    cutStockCount w a s ≤ cutStockCount w b s := by
+  unfold cutStockCount
+  apply sumN_mono
+  intro t ht
+  cases he : a (physicalTruck s t)
+  · simp [he]
+  · simp [he,h _ he]
+
+noncomputable def projectionProfile (w : World) (s : State) (C : Nat)
+    (seed : BinState) (side : Nat → Bool) (finish : Nat) : Nat :=
+  let I := visitInward w side s C seed
+  let O := visitInward w (fun a => !side a) s C seed
+  let k := cutStockCount w side s
+  let delta : Int := (finish : Int)-k
+  (max (2*(I : Int)-delta) (2*(O : Int)+delta)).toNat
+
+-- Input order is outermost (lowest coordinate threshold) to innermost.
+-- This is the reverse of the Python iteration, whose prefix minimum
+-- evaluates the same recurrence from the innermost threshold.
+noncomputable def projectionDP (w : World) (s : State) (C : Nat)
+    (seed : BinState) (top : Nat) : List ProjectionCut → Nat → Nat
+  | [], _ => 0
+  | c::cs, k => exactCutMin top ((List.range (k+1)).map (fun j =>
+      c.gap*projectionProfile w s C seed c.side j +
+        projectionDP w s C seed top cs j))
+
+noncomputable def projectionActualCost (w : World) (s u : State) (C : Nat) (seed : BinState)
+    (cuts : List ProjectionCut) : Nat :=
+  (cuts.map (fun c => c.gap * projectionProfile w s C seed c.side
+    (cutStockCount w c.side u))).sum
+
+theorem projection_dp_witness (w : World) (s u : State) (C : Nat) (seed : BinState)
+    (top : Nat) (cuts : List ProjectionCut) (valid : projectionNested cuts)
+    (k : Nat) (stock : ∀ c ∈ cuts, cutStockCount w c.side u ≤ k) :
+    projectionDP w s C seed top cuts k ≤ projectionActualCost w s u C seed cuts := by
+  induction cuts generalizing k with
+  | nil => simp [projectionDP,projectionActualCost]
+  | cons c cs ih =>
+    let j := cutStockCount w c.side u
+    have hj : j ≤ k := stock c (by simp)
+    have hchild := ih valid.2 j (fun d hd =>
+      projection_stock_mono w u d.side c.side (valid.1 d hd))
+    have hm : projectionDP w s C seed top (c::cs) k ≤
+        c.gap*projectionProfile w s C seed c.side j +
+          projectionDP w s C seed top cs j := by
+      rw [projectionDP]
+      apply exactCutMin_le_member
+      exact List.mem_map.mpr ⟨j,List.mem_range.mpr (by omega),rfl⟩
+    unfold projectionActualCost at *
+    simp only [List.map_cons,List.sum_cons]
+    change _ ≤ c.gap*projectionProfile w s C seed c.side j + _
+    omega
+
+def projectionFlux (w : World) (cuts : List ProjectionCut) (s u : State) : Nat :=
+  (cuts.map (fun c => c.gap*truckFlux w c.side s u)).sum
+
+def projectionStepCost (cuts : List ProjectionCut) (a b : Nat) : Nat :=
+  (cuts.map (fun c => c.gap*sideDelta c.side a b)).sum
+
+theorem projection_step_budget (w : World) (cuts : List ProjectionCut)
+    (noFerry : w.ferries = 0)
+    (road : ∀ a b, w.road a b → projectionStepCost cuts a b ≤ 2)
+    {s u : State} {m h : Nat} (st : Step w s u m h) :
+    projectionFlux w cuts s u ≤ 2*m := by
+  cases st with
+  | drive t a b ht hr valid =>
+    unfold projectionFlux
+    rw [sum_map_eq_on cuts _ (fun c => c.gap*sideDelta c.side a b)
+      (fun c _ => by rw [step_drive_flux w c.side s t a b ht valid.1])]
+    exact road a b hr
+  | board t f a ht hf hr room valid => omega
+  | disembark t f ht valid => omega
+  | sail f b hr hne valid => omega
+  | load p t a hp ht room valid =>
+    unfold projectionFlux
+    rw [sum_map_eq_zero cuts _ (fun c _ => by
+      rw [flux_zero_of_same_side w c.side s
+        {s with parcel := setAt s.parcel p (.onTruck t)} (fun _ _ => rfl),Nat.mul_zero])]
+    omega
+  | unload p t a hp ht valid =>
+    unfold projectionFlux
+    rw [sum_map_eq_zero cuts _ (fun c _ => by
+      rw [flux_zero_of_same_side w c.side s
+        {s with parcel := setAt s.parcel p (.ground a)} (fun _ _ => rfl),Nat.mul_zero])]
+    omega
+
+def projectionTraceCost (w : World) (cuts : List ProjectionCut)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) : Nat :=
+  (cuts.map (fun c => c.gap*(traceIn w c.side tr+traceOut w c.side tr))).sum
+
+theorem projection_trace_budget (w : World) (cuts : List ProjectionCut)
+    (noFerry : w.ferries = 0)
+    (road : ∀ a b, w.road a b → projectionStepCost cuts a b ≤ 2)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) :
+    projectionTraceCost w cuts tr ≤ 2*m := by
+  induction tr with
+  | nil s => simp [projectionTraceCost,traceIn,traceOut,sum_map_eq_zero]
+  | @cons s v u a b m h st tail ih =>
+    have hb := projection_step_budget w cuts noFerry road st
+    unfold projectionTraceCost projectionFlux at *
+    rw [sum_map_eq_on cuts _
+      (fun c => c.gap*truckFlux w c.side s v +
+        c.gap*(traceIn w c.side tail+traceOut w c.side tail))
+      (by intro c hc; simp [truckFlux,traceIn,traceOut,Nat.mul_add]; omega)]
+    rw [sum_map_add_nat]
+    omega
+
+theorem projection_actual_cost_bound (w : World) (cuts : List ProjectionCut)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) (done : Goal w u)
+    (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C) (seed : BinState) :
+    projectionActualCost w s u C seed cuts ≤ projectionTraceCost w cuts tr := by
+  unfold projectionActualCost projectionTraceCost
+  apply sum_map_le
+  intro c hc
+  apply Nat.mul_le_mul_left
+  have hh := (concrete_visit_cut_profile_bound w c.side
+    (trace_flux_path w c.side tr) done vl vp C cap seed).1
+  unfold projectionProfile
+  omega
+
+theorem paired_road_projection_admissible (w : World)
+    (left right : List ProjectionCut)
+    (vlft : projectionNested left) (vrgt : projectionNested right)
+    (noFerry : w.ferries = 0)
+    (road : ∀ a b, w.road a b → projectionStepCost (left++right) a b ≤ 2)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (seed : BinState) (top : Nat) :
+    handling w s + (projectionDP w s C seed top left w.trucks +
+      projectionDP w s C seed top right w.trucks + 1)/2 ≤ m+h := by
+  obtain ⟨tr⟩ := trace_from_path w path
+  have hl := projection_dp_witness w s u C seed top left vlft w.trucks
+    (fun c _ => cut_stock_le w c.side u)
+  have hr := projection_dp_witness w s u C seed top right vrgt w.trucks
+    (fun c _ => cut_stock_le w c.side u)
+  have h1 := projection_actual_cost_bound w left tr done vl vp C cap seed
+  have h2 := projection_actual_cost_bound w right tr done vl vp C cap seed
+  have hb := projection_trace_budget w (left++right) noFerry road tr
+  unfold projectionTraceCost at *
+  rw [List.map_append,natListSum_append] at hb
+  have ha := handling_path w path done
+  omega
+
+#print axioms paired_coordinate_budget
+#print axioms projection_dp_witness
+#print axioms projection_trace_budget
+#print axioms paired_road_projection_admissible
+end IslandLogistics
