@@ -1384,3 +1384,262 @@ theorem assignmentCutBound_le_witness (top : Nat) (caps : List Nat)
 #print axioms evalCut_le_witness
 #print axioms assignmentCutBound_le_witness
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Capacity feasibility of each individually carried parcel follows from
+-- the concrete LOAD precondition; this is preserved by all six actions.
+def ValidParcelFit (w : World) (s : State) : Prop :=
+  ∀ p, p < w.parcels → ∀ t, s.parcel p = .onTruck t →
+    w.weight p ≤ w.capacity t
+
+theorem step_parcel_fit (w : World) {s u : State} {m h : Nat}
+    (st : Step w s u m h) (v : ValidParcelFit w s) : ValidParcelFit w u := by
+  cases st with
+  | load p t a hp ht room valid =>
+    intro q hq z hz
+    change setAt s.parcel p (.onTruck t) q = .onTruck z at hz
+    by_cases eq : q = p
+    · subst q
+      have he : t = z := by simpa [setAt] using hz
+      subst z
+      omega
+    · exact v q hq z (by simpa [setAt, eq] using hz)
+  | unload p t a hp ht valid =>
+    intro q hq z hz
+    change setAt s.parcel p (.ground a) q = .onTruck z at hz
+    by_cases eq : q = p
+    · subst q
+      simp [setAt] at hz
+    · exact v q hq z (by simpa [setAt, eq] using hz)
+  | drive t a b ht hr valid => exact v
+  | board t f a ht hf hr room valid => exact v
+  | disembark t f ht valid => exact v
+  | sail f b hr hne valid => exact v
+
+theorem path_parcel_fit (w : World) {s u : State} {m h : Nat}
+    (path : Path (Step w) s u m h) (v : ValidParcelFit w s) :
+    ValidParcelFit w u := by
+  induction path with
+  | nil s => exact v
+  | cons st rest ih => exact ih (step_parcel_fit w st v)
+
+-- Paths in which the particular parcel has no non-goal unload.
+inductive SafeJobPath (w : World) (p : Nat) : State → State → Nat → Nat → Prop where
+  | nil (s : State) : SafeJobPath w p s s 0 0
+  | cons {s t u : State} {a b m h : Nat} :
+      Step w s t a b → extraOne w s t p = 0 →
+      SafeJobPath w p t u m h → SafeJobPath w p s u (a+m) (b+h)
+
+theorem safe_job_is_path (w : World) (p : Nat) {s u : State} {m h : Nat}
+    (path : SafeJobPath w p s u m h) : Path (Step w) s u m h := by
+  induction path with
+  | nil s => exact Path.nil s
+  | cons st safe rest ih => exact Path.cons st ih
+
+theorem held_job_step (w : World) (p t : Nat)
+    {s u : State} {m h : Nat} (st : Step w s u m h)
+    (held : s.parcel p = .onTruck t) (safe : extraOne w s u p = 0) :
+    u.parcel p = .onTruck t ∨
+      (u.parcel p = .ground (w.goal p) ∧ s.truck t = .land (w.goal p) ∧ m = 0 ∧ h = 1) := by
+  cases st with
+  | drive q a b ht hr valid => exact Or.inl held
+  | board q f a ht hf hr room valid => exact Or.inl held
+  | disembark q f ht valid => exact Or.inl held
+  | sail f b hr hne valid => exact Or.inl held
+  | load q z a hp ht room valid =>
+    by_cases eq : p = q
+    · subst q
+      rw [hp] at held
+      cases held
+    · left
+      simpa [setAt, eq] using held
+  | unload q z a hp ht valid =>
+    by_cases eq : p = q
+    · subst q
+      have ht' : z = t := ParcelPosition.onTruck.inj (hp.symm.trans held)
+      subst z
+      have e : a = w.goal p := by
+        by_contra ne
+        simp [extraOne, setAt, hp, ne] at safe
+      subst a
+      right
+      exact ⟨by simp [setAt], ht, rfl, rfl⟩
+    · left
+      simpa [setAt, eq] using held
+
+theorem ground_job_step (w : World) (p a : Nat)
+    {s u : State} {m h : Nat} (st : Step w s u m h)
+    (ground : s.parcel p = .ground a) :
+    u.parcel p = .ground a ∨
+      (∃ t, u.parcel p = .onTruck t ∧ s.truck t = .land a ∧
+         t < w.trucks ∧ w.weight p ≤ w.capacity t ∧ m = 0 ∧ h = 1) := by
+  cases st with
+  | drive q b c ht hr valid => exact Or.inl ground
+  | board q f b ht hf hr room valid => exact Or.inl ground
+  | disembark q f ht valid => exact Or.inl ground
+  | sail f b hr hne valid => exact Or.inl ground
+  | load q t b hp ht room valid =>
+    by_cases eq : p = q
+    · subst q
+      have he : b = a := ParcelPosition.ground.inj (hp.symm.trans ground)
+      subst b
+      right
+      refine ⟨t, by simp [setAt], ht, valid.2.1, ?_, rfl, rfl⟩
+      omega
+    · left
+      simpa [setAt, eq] using ground
+  | unload q t b hp ht valid =>
+    by_cases eq : p = q
+    · subst q
+      rw [hp] at ground
+      cases ground
+    · left
+      simpa [setAt, eq] using ground
+
+-- A literal contiguous segment of the concrete path, with the parcel
+-- on the very same truck in every state, including both endpoints.
+inductive CarrierSegment (w : World) (p t : Nat) :
+    State → State → Nat → Nat → Prop where
+  | nil (s : State) : s.parcel p = .onTruck t → CarrierSegment w p t s s 0 0
+  | cons {s v u : State} {a b m h : Nat} :
+      s.parcel p = .onTruck t → Step w s v a b →
+      CarrierSegment w p t v u m h →
+      CarrierSegment w p t s u (a+m) (b+h)
+
+theorem carrier_segment_is_path (w : World) (p t : Nat)
+    {s u : State} {m h : Nat} (seg : CarrierSegment w p t s u m h) :
+    Path (Step w) s u m h := by
+  induction seg with
+  | nil s hs => exact Path.nil s
+  | cons hs st rest ih => exact Path.cons st ih
+
+-- If the parcel is already carried and has no non-goal unload, its first
+-- delivery is performed by its actual initial carrier.  The witness is
+-- extracted from the legal path rather than assumed as a DP property.
+theorem held_first_delivery (w : World) (p t : Nat)
+    {s u : State} {m h : Nat} (path : SafeJobPath w p s u m h)
+    (held : s.parcel p = .onTruck t)
+    (done : u.parcel p = .ground (w.goal p)) :
+    ∃ x y cm ch rm rh,
+      CarrierSegment w p t s x cm ch ∧
+      Step w x y 0 1 ∧ x.truck t = .land (w.goal p) ∧
+      y.parcel p = .ground (w.goal p) ∧
+      Path (Step w) y u rm rh ∧
+      m = cm + rm ∧ h = ch + 1 + rh := by
+  induction path with
+  | nil s =>
+    rw [held] at done
+    cases done
+  | @cons s v u a b m h st safe rest ih =>
+    rcases held_job_step w p t st held safe with keep | finish
+    · obtain ⟨x,y,cm,ch,rm,rh,seg,un,atGoal,delivered,suffix,hm,hh⟩ := ih keep done
+      exact ⟨x,y,a+cm,b+ch,rm,rh,CarrierSegment.cons held st seg,
+        un,atGoal,delivered,suffix,by omega,by omega⟩
+    · obtain ⟨delivered,atGoal,hm,hh⟩ := finish
+      subst a
+      subst b
+      exact ⟨s,v,0,0,m,h,CarrierSegment.nil s held,st,atGoal,delivered,
+        safe_job_is_path w p rest,by omega,by omega⟩
+
+-- A ground, unfinished parcel must first be picked up at its original
+-- source.  The corresponding truck satisfies the true LOAD capacity.
+theorem ground_first_pickup (w : World) (p source : Nat)
+    {s u : State} {m h : Nat} (path : SafeJobPath w p s u m h)
+    (ground : s.parcel p = .ground source)
+    (unfinished : source ≠ w.goal p)
+    (done : u.parcel p = .ground (w.goal p)) :
+    ∃ t x y pm ph rm rh,
+      SafeJobPath w p s x pm ph ∧ Step w x y 0 1 ∧
+      x.truck t = .land source ∧ y.parcel p = .onTruck t ∧
+      t < w.trucks ∧ w.weight p ≤ w.capacity t ∧
+      SafeJobPath w p y u rm rh ∧
+      m = pm + rm ∧ h = ph + 1 + rh := by
+  induction path with
+  | nil s =>
+    exact False.elim (unfinished (ParcelPosition.ground.inj (ground.symm.trans done)))
+  | @cons s v u a b m h st safe rest ih =>
+    rcases ground_job_step w p source st ground with keep | pick
+    · obtain ⟨t,x,y,pm,ph,rm,rh,prefix,load,atSource,held,valid,fit,suffix,hm,hh⟩ := ih keep done
+      exact ⟨t,x,y,a+pm,b+ph,rm,rh,SafeJobPath.cons st safe prefix,
+        load,atSource,held,valid,fit,suffix,by omega,by omega⟩
+    · obtain ⟨t,held,atSource,valid,fit,hm,hh⟩ := pick
+      subst a
+      subst b
+      exact ⟨t,s,v,0,0,m,h,SafeJobPath.nil s,st,atSource,held,valid,fit,
+        rest,by omega,by omega⟩
+
+-- Flags are derived from each concrete edge, not from a guessed assignment.
+inductive FlaggedPath (w : World) :
+    State → State → Nat → Nat → Nat → (Nat → Bool) → Prop where
+  | nil (s : State) : FlaggedPath w s s 0 0 0 (fun _ => false)
+  | cons {s v u : State} {a b m h e : Nat} {flags : Nat → Bool} :
+      Step w s v a b → FlaggedPath w v u m h e flags →
+      FlaggedPath w s u (a+m) (b+h) (extraUnload w s v+e)
+        (fun p => decide (extraOne w s v p ≠ 0) || flags p)
+
+theorem flags_from_residual (w : World) {s u : State} {m h e : Nat}
+    (path : ResidualPath w s u m h e) :
+    ∃ flags, FlaggedPath w s u m h e flags := by
+  induction path with
+  | nil s => exact ⟨_,FlaggedPath.nil s⟩
+  | cons st rest ih =>
+    obtain ⟨flags,pr⟩ := ih
+    exact ⟨_,FlaggedPath.cons st pr⟩
+
+theorem flag_false_safe (w : World) (p : Nat)
+    {s u : State} {m h e : Nat} {flags : Nat → Bool}
+    (path : FlaggedPath w s u m h e flags) (safe : flags p = false) :
+    SafeJobPath w p s u m h := by
+  induction path with
+  | nil s => exact SafeJobPath.nil s
+  | @cons s v u a b m h e flags st rest ih =>
+    have hs : extraOne w s v p = 0 ∧ flags p = false := by
+      simpa [Bool.or_eq_false_iff] using safe
+    exact SafeJobPath.cons st hs.1 (ih hs.2)
+
+theorem extraOne_zero_or_two (w : World) (s u : State) (p : Nat) :
+    extraOne w s u p = 0 ∨ extraOne w s u p = 2 := by
+  cases hs : s.parcel p <;> cases hu : u.parcel p <;> simp [extraOne,hs,hu]
+  split <;> simp_all
+
+def flagCharge (w : World) (flags : Nat → Bool) : Nat :=
+  sumN (fun p => if flags p then 2 else 0) w.parcels
+
+theorem sumN_mono (f g : Nat → Nat) (n : Nat)
+    (h : ∀ q, q < n → f q ≤ g q) : sumN f n ≤ sumN g n := by
+  induction n with
+  | zero => simp [sumN]
+  | succ n ih =>
+    have h1 := h n (by omega)
+    have h2 := ih (fun q hq => h q (by omega))
+    simp only [sumN]
+    omega
+
+theorem flags_cost (w : World)
+    {s u : State} {m h e : Nat} {flags : Nat → Bool}
+    (path : FlaggedPath w s u m h e flags) : flagCharge w flags ≤ e := by
+  induction path with
+  | nil s => simp [flagCharge, sumN_zero]
+  | @cons s v u a b m h e flags st rest ih =>
+    have hsum : sumN (fun p => if (decide (extraOne w s v p ≠ 0) || flags p) then 2 else 0) w.parcels ≤
+        sumN (fun p => extraOne w s v p + (if flags p then 2 else 0)) w.parcels := by
+      apply sumN_mono
+      intro q hq
+      rcases extraOne_zero_or_two w s v q with hz | ht
+      · simp [hz]
+      · cases hf : flags q <;> simp [ht,hf]
+    rw [sumN_add] at hsum
+    unfold flagCharge at *
+    unfold extraUnload
+    omega
+
+#print axioms path_parcel_fit
+#print axioms held_first_delivery
+#print axioms ground_first_pickup
+#print axioms flags_from_residual
+#print axioms flag_false_safe
+#print axioms flags_cost
+
+end IslandLogistics
