@@ -432,7 +432,7 @@ theorem setAt_commute (v : Nat → Nat) (f g b c : Nat) (hne : g ≠ f) :
   · subst i
     have hfg : f ≠ g := Ne.symm hne
     simp [setAt, hfg]
-  · by_cases h : i = g <;> simp [setAt, e, h]
+  · by_cases h : i = g <;> simp [setAt, e, h, hne]
 
 -- Exactly the concrete transitions that do not perform a service or sail
 -- on the selected ferry. A truck aboard it cannot drive/load/unload
@@ -562,7 +562,7 @@ theorem contract_sails (w : World) (s : State) (f b c : Nat)
         funext i
         by_cases hi : i = f
         · subst i
-          simp [setAt, same]
+          simpa [setAt] using same.symm
         · simp [setAt, hi]
     rw [e]
     exact ⟨0, by omega, Path.nil s⟩
