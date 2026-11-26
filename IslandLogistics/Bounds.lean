@@ -1097,6 +1097,67 @@ by DirectCutAssignments.assignment and the witness inequality of the
 subset-min/merge recurrence. The concrete extraction of all geometric
 witnesses and NumPy refinement remain separate obligations. -/
 
+-- Exact minimum of a nonempty list, with a fallback ONLY on empty input.
+-- In particular, no extra finite sentinel can weaken the Python DP.
+def foldCutMin (seed : Nat) : List Nat → Nat
+  | [] => seed
+  | x :: xs => foldCutMin (min seed x) xs
+
+theorem foldCutMin_le_seed (seed : Nat) (xs : List Nat) :
+    foldCutMin seed xs ≤ seed := by
+  induction xs generalizing seed with
+  | nil => simp [foldCutMin]
+  | cons x xs ih =>
+    exact Nat.le_trans (ih (min seed x)) (Nat.min_le_left _ _)
+
+theorem foldCutMin_le_member (seed : Nat) (xs : List Nat) (z : Nat)
+    (hz : z ∈ xs) : foldCutMin seed xs ≤ z := by
+  induction xs generalizing seed with
+  | nil => simp at hz
+  | cons x xs ih =>
+    rw [List.mem_cons] at hz
+    rcases hz with eq | h
+    · subst z
+      exact Nat.le_trans (foldCutMin_le_seed (min seed x) xs) (Nat.min_le_right _ _)
+    · exact ih (min seed x) h
+
+def exactCutMin (fallback : Nat) : List Nat → Nat
+  | [] => fallback
+  | x :: xs => foldCutMin x xs
+
+theorem exactCutMin_le_member (fallback : Nat) (xs : List Nat) (z : Nat)
+    (hz : z ∈ xs) : exactCutMin fallback xs ≤ z := by
+  cases xs with
+  | nil => simp at hz
+  | cons x xs =>
+    rw [List.mem_cons] at hz
+    rcases hz with eq | h
+    · subst z
+      exact foldCutMin_le_seed _ _
+    · exact foldCutMin_le_member _ _ _ h
+
+theorem foldCutMin_attained (seed : Nat) (xs : List Nat) :
+    foldCutMin seed xs ∈ seed :: xs := by
+  induction xs generalizing seed with
+  | nil => simp [foldCutMin]
+  | cons x xs ih =>
+    have h := ih (min seed x)
+    rw [List.mem_cons] at h
+    change foldCutMin (min seed x) xs ∈ seed :: x :: xs
+    rcases h with eq | hm
+    · rw [eq]
+      by_cases he : seed ≤ x
+      · rw [Nat.min_eq_left he]; simp
+      · have he' : x ≤ seed := by omega
+        rw [Nat.min_eq_right he']; simp
+    · exact List.mem_cons_of_mem _ (List.mem_cons_of_mem _ hm)
+
+theorem exactCutMin_attained (fallback : Nat) (xs : List Nat) (h : xs ≠ []) :
+    exactCutMin fallback xs ∈ xs := by
+  cases xs with
+  | nil => contradiction
+  | cons x xs => exact foldCutMin_attained x xs
+
 def encodeDigits (base : Nat) : List Nat → Nat
   | [] => 0
   | d :: ds => d + base * encodeDigits base ds
@@ -1201,21 +1262,21 @@ theorem submask_column_complete (mask j : Nat) (h : j ≤ mask)
 -- Literal min-plus entries: merge computes the minimum over all
 -- disjoint allocations represented by (mask xor submask, submask).
 def mergeValue (top : Nat) (left right : Nat → Nat) (mask : Nat) : Nat :=
-  minCandidate top ((submaskColumns mask).map (fun j => left (mask ^^^ j) + right j))
+  exactCutMin top ((submaskColumns mask).map (fun j => left (mask ^^^ j) + right j))
 
 theorem mergeValue_witness (top : Nat) (left right : Nat → Nat) (mask j : Nat)
     (h : j ≤ mask) (hs : j &&& mask = j) :
     mergeValue top left right mask ≤ left (mask ^^^ j) + right j := by
-  apply minCandidate_le_member
+  apply exactCutMin_le_member
   exact List.mem_map.mpr ⟨j, submask_column_complete mask j h hs, rfl⟩
 
 def subsetMinValue (top : Nat) (row : Nat → Nat) (mask : Nat) : Nat :=
-  minCandidate top ((submaskColumns mask).map row)
+  exactCutMin top ((submaskColumns mask).map row)
 
 theorem subsetMinValue_witness (top : Nat) (row : Nat → Nat) (mask j : Nat)
     (h : j ≤ mask) (hs : j &&& mask = j) :
     subsetMinValue top row mask ≤ row j := by
-  apply minCandidate_le_member
+  apply exactCutMin_le_member
   exact List.mem_map.mpr ⟨j, submask_column_complete mask j h hs, rfl⟩
 
 -- A syntax tree for exactly the operations of the scalar cut DP.
@@ -1276,7 +1337,7 @@ theorem evalCut_le_witness (top : Nat) {tree mask cost}
 -- residual_goal_budget theorem bounds it by non-goal unloads.
 def assignmentCutBound (top : Nat) (caps : List Nat) (jobs : List AssignmentJob)
     (baseMove scale aboard mask : Nat) (tree : List Nat → CutDP) : Nat :=
-  minCandidate top ((assignmentColumns caps jobs).map (fun ds =>
+  exactCutMin top ((assignmentColumns caps jobs).map (fun ds =>
     omittedPenalty caps.length ds +
       max baseMove ((evalCut top (tree ds) mask + scale - 1) / scale - aboard)))
 
@@ -1292,7 +1353,7 @@ theorem assignmentCutBound_le_witness (top : Nat) (caps : List Nat)
   have hmin : assignmentCutBound top caps jobs baseMove scale aboard mask tree ≤
       omittedPenalty caps.length ds +
         max baseMove ((evalCut top (tree ds) mask + scale - 1) / scale - aboard) := by
-    apply minCandidate_le_member
+    apply exactCutMin_le_member
     exact List.mem_map.mpr ⟨ds, member, rfl⟩
   have hcost := evalCut_le_witness top witness
   have hceil : (evalCut top (tree ds) mask + scale - 1) / scale ≤ (cost + scale - 1) / scale :=
