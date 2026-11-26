@@ -15,13 +15,23 @@ inductive Path {S : Type} (edge : S → S → Nat → Nat → Prop) :
       edge s t a b → Path edge t u m h → Path edge s u (a + m) (b + h)
 
 theorem potential_bound {S : Type} {edge : S → S → Nat → Nat → Prop}
-    (pot : S → Nat) (local : ∀ s t a b, edge s t a b → pot s ≤ a + pot t)
+    (pot : S → Nat) (stepBound : ∀ s t a b, edge s t a b → pot s ≤ a + pot t)
     {s t : S} {m h : Nat} (p : Path edge s t m h) :
     pot s ≤ m + pot t := by
   induction p with
   | nil s => simp
-  | @cons s t u a b m h step rest ih =>
-    have he := local s t a b step
+  | cons step rest ih =>
+    have he := stepBound _ _ _ _ step
+    omega
+
+theorem handling_bound {S : Type} {edge : S → S → Nat → Nat → Prop}
+    (pot : S → Nat) (stepBound : ∀ s t a b, edge s t a b → pot s ≤ b + pot t)
+    {s t : S} {m h : Nat} (p : Path edge s t m h) :
+    pot s ≤ h + pot t := by
+  induction p with
+  | nil s => simp
+  | cons step rest ih =>
+    have he := stepBound _ _ _ _ step
     omega
 
 theorem partition_bound {S : Type} {edge : S → S → Nat → Nat → Prop}
@@ -32,18 +42,11 @@ theorem partition_bound {S : Type} {edge : S → S → Nat → Nat → Prop}
     (gt : transport t = 0) (gh : handling t = 0) :
     transport s + handling s ≤ m + h := by
   have tm := potential_bound transport ht p
-  have hm := potential_bound handling
-    (edge := fun s t a b => edge s t b a) (by
-      intro s t a b e
-      exact hh s t b a e)
-    (s := s) (t := t) (m := h) (h := m) (by
-      induction p with
-      | nil s => exact Path.nil s
-      | cons step rest ih => exact Path.cons step ih)
+  have hm := handling_bound handling hh p
   omega
 
 theorem max_bound (x y z : Nat) (hx : x ≤ z) (hy : y ≤ z) :
-    max x y ≤ z := by omega
+    max x y ≤ z := Nat.max_le.mpr ⟨hx, hy⟩
 
 theorem sum_partition (h cut residual moves handle : Nat)
     (hh : h ≤ handle) (hc : cut ≤ moves) (hr : residual ≤ moves - cut) :
@@ -73,11 +76,8 @@ theorem crossing_pair_form {s t : Bool} {i o : Nat}
       i = k + (if s = false ∧ t = true then 1 else 0) ∧
       o = k + (if s = true ∧ t = false then 1 else 0) := by
   have h := crossing_balance p
-  cases s <;> cases t <;> simp [sideStock] at h ⊢
-  · exact ⟨i, rfl, by omega⟩
-  · exact ⟨o, by omega, rfl⟩
-  · exact ⟨i, rfl, by omega⟩
-  · exact ⟨i, rfl, by omega⟩
+  cases s <;> cases t <;> simp [sideStock] at h <;>
+    refine ⟨min i o, ?_, ?_⟩ <;> simp <;> omega
 
 theorem inventory_lower (i o enter leave stock trucks : Nat)
     (hi : i ≤ enter) (ho : o ≤ leave)
