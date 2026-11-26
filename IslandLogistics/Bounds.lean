@@ -6594,3 +6594,196 @@ theorem trace_route_vector_entry (w : World) (r : RouteData)
 #print axioms trace_route_mask_eligible
 #print axioms trace_route_vector_entry
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+def routeOmitted (n mask : Nat) : Nat :=
+  sumN (fun i => if mask.testBit i then 0 else 1) n
+
+theorem sumN_shift (f : Nat → Nat) (n : Nat) :
+    sumN f (n+1) = f 0 + sumN (fun i => f (i+1)) n := by
+  induction n with
+  | zero => simp [sumN]
+  | succ n ih =>
+    change sumN f (n+1) + f (n+1) =
+      f 0 + (sumN (fun i => f (i+1)) n + f (n+1))
+    rw [ih,Nat.add_assoc]
+
+theorem list_index_sum (xs : List Nat) (f : Nat → Nat) :
+    sumN (fun i => f (xs.getD i 0)) xs.length = (xs.map f).sum := by
+  induction xs with
+  | nil => rfl
+  | cons x xs ih =>
+    rw [List.length_cons,sumN_shift]
+    simp only [List.getD_cons_zero,List.getD_cons_succ,List.map_cons,List.sum_cons]
+    rw [ih]
+
+theorem routeOmitted_le (n mask : Nat) : routeOmitted n mask ≤ n := by
+  induction n with
+  | zero => simp [routeOmitted,sumN]
+  | succ n ih =>
+    change routeOmitted n mask + (if mask.testBit n then 0 else 1) ≤ n+1
+    cases mask.testBit n <;> simp <;> omega
+
+def traceRouteMask (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) : Nat :=
+  routeMaskUnion (routeAssignedMask w tr) (List.range w.trucks)
+
+theorem trace_route_mask_bit (w : World)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (done : Goal w u) (vp : ValidParcelCarriers w s) (vf : ValidParcelFit w s)
+    (i : Nat) (hi : i < (activeParcels w s).length) :
+    (traceRouteMask w tr).testBit i =
+      !traceFlag w tr ((activeParcels w s).getD i 0) := by
+  let p := (activeParcels w s).getD i 0
+  have hp : p ∈ activeParcels w s := by
+    exact List.mem_of_getElem (h := hi) (by simp [p,hi])
+  have hv : p < w.parcels ∧ s.parcel p ≠ .ground (w.goal p) := by
+    simpa [activeParcels] using hp
+  cases hf : traceFlag w tr p with
+  | true =>
+    change (traceRouteMask w tr).testBit i = !traceFlag w tr p
+    rw [hf]
+    cases hb : (traceRouteMask w tr).testBit i
+    · rfl
+    · obtain ⟨t,ht,bit⟩ := (route_mask_union_bit _ _ i).mp hb
+      have hsel : traceSelector w tr t p = true := by
+        simpa [routeAssignedMask,localRouteMask,predMask_testBit,hi,p] using bit
+      have he : traceDigit w tr p = t := by
+        have q := hsel
+        simp [traceSelector] at q
+        exact q.2
+      have ht' := List.mem_range.mp ht
+      simp [traceDigit,hf] at he
+      omega
+  | false =>
+    obtain ⟨t,car,ht,fit,own⟩ := trace_carrier_exists w tr done vp vf p hv.1 hv.2
+    have hsel : traceSelector w tr t p = true := by
+      simp [traceSelector,traceDigit,hf,car,hv.2]
+    have bit : (routeAssignedMask w tr t).testBit i = true := by
+      simp [routeAssignedMask,localRouteMask,predMask_testBit,hi,← p,hsel]
+    have hb : (traceRouteMask w tr).testBit i = true :=
+      (route_mask_union_bit _ _ i).mpr ⟨t,List.mem_range.mpr ht,bit⟩
+    change (traceRouteMask w tr).testBit i = !traceFlag w tr p
+    simp [hb,hf]
+
+theorem trace_route_mask_range (w : World) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) :
+    traceRouteMask w tr < 2^(activeParcels w s).length := by
+  apply Nat.lt_pow_two_of_testBit
+  intro i hi
+  cases hb : (traceRouteMask w tr).testBit i
+  · rfl
+  · obtain ⟨t,ht,bit⟩ := (route_mask_union_bit _ _ i).mp hb
+    have q : i < (activeParcels w s).length := by
+      have h : i < (activeParcels w s).length ∧
+          traceSelector w tr t ((activeParcels w s).getD i 0) = true := by
+        simpa [routeAssignedMask,localRouteMask,predMask_testBit] using bit
+      exact h.1
+    omega
+
+theorem trace_route_omission_budget (w : World)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (done : Goal w u) (vp : ValidParcelCarriers w s) (vf : ValidParcelFit w s) :
+    handling w s + 2*routeOmitted (activeParcels w s).length (traceRouteMask w tr) ≤ h := by
+  have he : 2*routeOmitted (activeParcels w s).length (traceRouteMask w tr) =
+      ((activeParcels w s).map (fun p => if traceFlag w tr p then 2 else 0)).sum := by
+    unfold routeOmitted
+    rw [← sumN_mul_left,← list_index_sum]
+    apply sumN_congr
+    intro i hi
+    rw [trace_route_mask_bit w tr done vp vf i hi]
+    cases traceFlag w tr ((activeParcels w s).getD i 0) <;> rfl
+  rw [he]
+  have hh := residual_goal_budget w (trace_residual w tr) done
+  have hf := flags_cost w (trace_flags w tr)
+  have ha := active_flags_cost w s (traceFlag w tr)
+  omega
+
+noncomputable def routeRows (w : World) (r : RouteData) (s : State) (top : Nat) :
+    List (Nat → Nat) :=
+  (List.range w.trucks).map (fun t => routeVectorEntry w r s top (activeParcels w s) t)
+
+theorem trace_route_convolution_bound (w : World) (r : RouteData) (fmt : RouteFormat w r)
+    (price : RouteTariff) (cert : RouteMetricCertificate w r price)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {d x f : Nat}
+    (counts : TraceCounts w tr d x f) (done : Goal w u)
+    (sources : ∀ p a, s.parcel p = .ground a → r.source p = .ground a)
+    (vf : ValidFerries w s) (vo : ValidFerryOccupancy w s)
+    (vp : ValidParcelCarriers w s) (fit : ValidParcelFit w s) (top : Nat) :
+    routeConvolution top (routeRows w r s top) (traceRouteMask w tr) ≤
+      price.drive*d + price.service*x + price.sail*f := by
+  have alloc := route_allocation_from_masks (routeAssignedMask w tr)
+    (fun t => routeVectorEntry w r s top (activeParcels w s) t)
+    (List.range w.trucks) (by simp) (assigned_mask_disjoint w tr)
+  have hb := route_convolution_witness top alloc
+  change routeConvolution top (routeRows w r s top) (traceRouteMask w tr) ≤ _ at hb
+  have he : ((List.range w.trucks).map (fun t =>
+        routeVectorEntry w r s top (activeParcels w s) t (routeAssignedMask w tr t))).sum =
+      sumN (fun t => routeRecurrence r (w.capacity t) top (2*r.parcels) (truckVertex s t)
+        (routeInitialPick w tr t) (routeInitialHeld w tr t)) w.trucks := by
+    rw [sum_range_eq_sumN]
+    apply sumN_congr
+    intro t ht
+    exact trace_route_vector_entry w r tr done vp fit t ht top
+  rw [he] at hb
+  exact Nat.le_trans hb (all_assigned_route_rows_bound w r fmt price cert counts done sources vf vo top)
+
+-- The grouping by number of omitted jobs is the actual options array:
+-- first minimize movement for each retained cardinality, then round up.
+noncomputable def routeOption (w : World) (r : RouteData) (s : State)
+    (top scale omitted : Nat) : Nat :=
+  let n := (activeParcels w s).length
+  let vals := ((List.range (2^n)).filter (fun mask => routeOmitted n mask == omitted)).map
+    (routeConvolution top (routeRows w r s top))
+  (exactCutMin top vals + scale-1)/scale
+
+noncomputable def routeTransferEstimate (w : World) (r : RouteData) (s : State)
+    (top scale baseMove extra : Nat) : Nat :=
+  handling w s + exactCutMin top ((List.range ((activeParcels w s).length+1)).map
+    (fun omitted => 2*omitted + max baseMove (routeOption w r s top scale omitted + extra)))
+
+theorem route_transfer_estimate_bound (w : World) (r : RouteData) (fmt : RouteFormat w r)
+    (price : RouteTariff) (cert : RouteMetricCertificate w r price)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {d x f : Nat}
+    (counts : TraceCounts w tr d x f) (done : Goal w u)
+    (sources : ∀ p a, s.parcel p = .ground a → r.source p = .ground a)
+    (vf : ValidFerries w s) (vo : ValidFerryOccupancy w s)
+    (vp : ValidParcelCarriers w s) (fit : ValidParcelFit w s)
+    (top scale baseMove extra : Nat) (hs : 0 < scale)
+    (base : baseMove ≤ m) (extraLe : extra ≤ m)
+    (budget : price.drive*d + price.service*x + price.sail*f ≤ (m-extra)*scale) :
+    routeTransferEstimate w r s top scale baseMove extra ≤ m+h := by
+  let mask := traceRouteMask w tr
+  let n := (activeParcels w s).length
+  let omitted := routeOmitted n mask
+  have hpen := trace_route_omission_budget w tr done vp fit
+  change handling w s + 2*omitted ≤ h at hpen
+  have hc := trace_route_convolution_bound w r fmt price cert counts done sources vf vo vp fit top
+  have hraw : exactCutMin top (((List.range (2^n)).filter
+      (fun a => routeOmitted n a == omitted)).map
+      (routeConvolution top (routeRows w r s top))) ≤ (m-extra)*scale := by
+    apply Nat.le_trans (exactCutMin_le_member top _ (routeConvolution top (routeRows w r s top) mask) ?_)
+      (Nat.le_trans hc budget)
+    apply List.mem_map.mpr
+    refine ⟨mask,?_,rfl⟩
+    simp [omitted,trace_route_mask_range w tr,n,mask]
+  have hopt : routeOption w r s top scale omitted ≤ m-extra := by
+    apply ceil_lower _ _ _ hs
+    exact hraw
+  have hmember : omitted ∈ List.range (n+1) :=
+    List.mem_range.mpr (by have := routeOmitted_le n mask; omega)
+  have hmin : exactCutMin top ((List.range (n+1)).map
+      (fun omitted => 2*omitted + max baseMove (routeOption w r s top scale omitted + extra))) ≤
+      2*omitted + max baseMove (routeOption w r s top scale omitted + extra) :=
+    exactCutMin_le_member top _ _ (List.mem_map.mpr ⟨omitted,hmember,rfl⟩)
+  unfold routeTransferEstimate
+  change handling w s + exactCutMin top ((List.range (n+1)).map _) ≤ m+h
+  omega
+
+#print axioms trace_route_mask_bit
+#print axioms trace_route_omission_budget
+#print axioms trace_route_convolution_bound
+#print axioms route_transfer_estimate_bound
+end IslandLogistics
