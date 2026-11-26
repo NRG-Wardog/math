@@ -5755,3 +5755,205 @@ theorem route_convolution_witness (top : Nat)
 #print axioms route_recurrence_le_actual
 #print axioms route_convolution_witness
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+structure RouteFormat (w : World) (r : RouteData) : Prop where
+  count : r.parcels = w.parcels
+  weights : ∀ p, r.weight p = w.weight p
+  targets : ∀ p, r.target p = .ground (w.goal p)
+
+def PendingRouteJob (w : World) (r : RouteData) (t : Nat)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) (p : Nat) : Prop :=
+  p < w.parcels ∧ ∃ a, s.parcel p = .ground a ∧ r.source p = .ground a ∧
+    a ≠ w.goal p ∧ traceCarrier w tr p = some t ∧ traceSafe w tr p
+
+def HeldRouteJob (w : World) (t : Nat)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) (p : Nat) : Prop :=
+  p < w.parcels ∧ s.parcel p = .onTruck t ∧ traceSafe w tr p
+
+structure RouteOK (w : World) (r : RouteData) (t : Nat)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) (pick held : Nat) : Prop where
+  pending : ∀ p, pick.testBit p = true → PendingRouteJob w r t tr p
+  held : ∀ p, held.testBit p = true → HeldRouteJob w t tr p
+
+theorem pending_tail_same (w : World) (r : RouteData) (t p : Nat)
+    {s v u : State} {a b m h : Nat} (st : Step w s v a b) (tail : LegalTrace w v u m h)
+    (job : PendingRouteJob w r t (LegalTrace.cons st tail) p)
+    (same : v.parcel p = s.parcel p) :
+    PendingRouteJob w r t tail p := by
+  obtain ⟨hp,x,hground,hsource,hactive,hcarrier,hsafe⟩ := job
+  have hcar : traceCarrier w tail p = some t := by
+    simpa [traceCarrier,hground] using hcarrier
+  exact ⟨hp,x,same.trans hground,hsource,hactive,hcar,hsafe.2⟩
+
+theorem held_tail_same (w : World) (t p : Nat)
+    {s v u : State} {a b m h : Nat} (st : Step w s v a b) (tail : LegalTrace w v u m h)
+    (job : HeldRouteJob w t (LegalTrace.cons st tail) p)
+    (same : v.parcel p = s.parcel p) :
+    HeldRouteJob w t tail p :=
+  ⟨job.1,same.trans job.2.1,job.2.2.2⟩
+
+theorem route_ok_same (w : World) (r : RouteData) (t pick held : Nat)
+    {s v u : State} {a b m h : Nat} (st : Step w s v a b) (tail : LegalTrace w v u m h)
+    (ok : RouteOK w r t (LegalTrace.cons st tail) pick held)
+    (same : ∀ p, pick.testBit p = true ∨ held.testBit p = true → v.parcel p = s.parcel p) :
+    RouteOK w r t tail pick held :=
+  ⟨fun p hp => pending_tail_same w r t p st tail (ok.pending p hp) (same p (Or.inl hp)),
+   fun p hp => held_tail_same w t p st tail (ok.held p hp) (same p (Or.inr hp))⟩
+
+theorem route_ok_disjoint (w : World) (r : RouteData) (t : Nat)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {pick held : Nat}
+    (ok : RouteOK w r t tr pick held) (p : Nat) (hp : pick.testBit p = true) :
+    held.testBit p = false := by
+  cases hh : held.testBit p with
+  | false => rfl
+  | true =>
+    obtain ⟨_,a,ha,_,_,_,_⟩ := ok.pending p hp
+    have hc := (ok.held p hh).2.1
+    rw [ha] at hc
+    cases hc
+
+theorem route_load_le_real (w : World) (r : RouteData) (fmt : RouteFormat w r)
+    (t : Nat) {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {pick held : Nat}
+    (ok : RouteOK w r t tr pick held) : routeLoad r held ≤ load w s t := by
+  unfold routeLoad load
+  rw [fmt.count]
+  apply sumN_mono
+  intro p hp
+  cases hh : held.testBit p with
+  | false => simp [hh]
+  | true => simp [hh,fmt.weights,(ok.held p hh).2.1]
+
+theorem route_pickup_carrier (w : World) (r : RouteData) (t p z a : Nat)
+    {s u : State} {m h : Nat}
+    (hp : s.parcel p = .ground a) (ht : s.truck z = .land a)
+    (room : load w s z + w.weight p ≤ w.capacity z)
+    (valid : p < w.parcels ∧ z < w.trucks ∧ a < w.locations)
+    (tail : LegalTrace w {s with parcel := setAt s.parcel p (.onTruck z)} u m h)
+    (job : PendingRouteJob w r t (LegalTrace.cons (Step.load s p z a hp ht room valid) tail) p) :
+    z = t := by
+  obtain ⟨_,x,hg,hs,ha,hcarrier,hSafe⟩ := job
+  have car : traceCarrier w tail p = some t := by simpa [traceCarrier,hp] using hcarrier
+  have actual := traceCarrier_held w tail p z (by simp [setAt])
+  rw [car] at actual
+  exact (Option.some.inj actual).symm
+
+theorem route_pickup_ok (w : World) (r : RouteData) (t p a pick held : Nat)
+    {s u : State} {m h : Nat}
+    (hp : s.parcel p = .ground a) (ht : s.truck t = .land a)
+    (room : load w s t + w.weight p ≤ w.capacity t)
+    (valid : p < w.parcels ∧ t < w.trucks ∧ a < w.locations)
+    (tail : LegalTrace w {s with parcel := setAt s.parcel p (.onTruck t)} u m h)
+    (ok : RouteOK w r t (LegalTrace.cons (Step.load s p t a hp ht room valid) tail) pick held)
+    (selected : pick.testBit p = true) :
+    RouteOK w r t tail (pick ^^^ 2^p) (held ||| 2^p) := by
+  constructor
+  · intro q hq
+    by_cases eq : q = p
+    · subst q
+      simp [Nat.testBit_xor,Nat.testBit_two_pow,selected] at hq
+    · have hb : pick.testBit q = true := by
+        simpa [Nat.testBit_xor,Nat.testBit_two_pow,Ne.symm eq] using hq
+      exact pending_tail_same w r t q _ tail (ok.pending q hb) (by simp [setAt,eq])
+  · intro q hq
+    by_cases eq : q = p
+    · subst q
+      obtain ⟨validP,source,hg,hs,ha,hcar,hsafe⟩ := ok.pending p selected
+      exact ⟨validP,by simp [setAt],hsafe.2⟩
+    · have hb : held.testBit q = true := by
+        simpa [Nat.testBit_or,Nat.testBit_two_pow,Ne.symm eq] using hq
+      exact held_tail_same w t q _ tail (ok.held q hb) (by simp [setAt,eq])
+
+theorem route_delivery_ok (w : World) (r : RouteData) (t p a pick held : Nat)
+    {s u : State} {m h : Nat}
+    (hp : s.parcel p = .onTruck t) (ht : s.truck t = .land a)
+    (valid : p < w.parcels ∧ t < w.trucks ∧ a < w.locations)
+    (tail : LegalTrace w {s with parcel := setAt s.parcel p (.ground a)} u m h)
+    (ok : RouteOK w r t (LegalTrace.cons (Step.unload s p t a hp ht valid) tail) pick held)
+    (selected : held.testBit p = true) :
+    RouteOK w r t tail pick (held ^^^ 2^p) := by
+  constructor
+  · intro q hq
+    have ne : q ≠ p := by
+      intro eq; subst q
+      have hh := route_ok_disjoint w r t ok p hq
+      simp [selected] at hh
+    exact pending_tail_same w r t q _ tail (ok.pending q hq) (by simp [setAt,ne])
+  · intro q hq
+    by_cases eq : q = p
+    · subst q
+      simp [Nat.testBit_xor,Nat.testBit_two_pow,selected] at hq
+    · have hb : held.testBit q = true := by
+        simpa [Nat.testBit_xor,Nat.testBit_two_pow,Ne.symm eq] using hq
+      exact held_tail_same w t q _ tail (ok.held q hb) (by simp [setAt,eq])
+
+def routeCount (r : RouteData) (pick held : Nat) : Nat :=
+  sumN (fun p => (if pick.testBit p then 2 else 0) + (if held.testBit p then 1 else 0)) r.parcels
+
+theorem route_pickup_count (r : RouteData) (pick held p : Nat)
+    (hp : p < r.parcels) (h1 : pick.testBit p = true) (h2 : held.testBit p = false) :
+    routeCount r pick held = routeCount r (pick ^^^ 2^p) (held ||| 2^p) + 1 := by
+  unfold routeCount
+  apply sumN_one_delta _ _ p _ _ hp
+  · intro q hq; simp [Nat.testBit_xor,Nat.testBit_or,Nat.testBit_two_pow,Ne.symm hq]
+  · simp [Nat.testBit_xor,Nat.testBit_or,Nat.testBit_two_pow,h1,h2]
+
+theorem route_delivery_count (r : RouteData) (pick held p : Nat)
+    (hp : p < r.parcels) (h1 : held.testBit p = true) :
+    routeCount r pick held = routeCount r pick (held ^^^ 2^p) + 1 := by
+  unfold routeCount
+  apply sumN_one_delta _ _ p _ _ hp
+  · intro q hq; simp [Nat.testBit_xor,Nat.testBit_two_pow,Ne.symm hq]
+  · simp [Nat.testBit_xor,Nat.testBit_two_pow,h1]
+
+theorem route_ok_count_le (w : World) (r : RouteData) (t : Nat)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {pick held : Nat}
+    (ok : RouteOK w r t tr pick held) :
+    routeCount r pick held ≤ 2*r.parcels := by
+  unfold routeCount
+  have hb := sumN_mono
+    (fun p => (if pick.testBit p then 2 else 0) + (if held.testBit p then 1 else 0))
+    (fun _ => 2) r.parcels (by
+      intro p hp
+      cases hx : pick.testBit p
+      · cases hy : held.testBit p <;> simp [hx,hy]
+      · simp [hx,route_ok_disjoint w r t ok p hx])
+  have he : sumN (fun _ => 2) r.parcels = 2*r.parcels := by
+    induction r.parcels with
+    | zero => rfl
+    | succ n ih => simp [sumN,ih,Nat.mul_add]
+  omega
+
+theorem route_goal_masks (w : World) (r : RouteData) (t : Nat)
+    (s : State) (pick held : Nat) (done : Goal w s)
+    (ok : RouteOK w r t (LegalTrace.nil s) pick held) :
+    pick = 0 ∧ held = 0 := by
+  constructor
+  · apply Nat.eq_of_testBit_eq
+    intro p
+    rw [Nat.zero_testBit]
+    cases hp : pick.testBit p
+    · rfl
+    · obtain ⟨valid,a,hground,hs,ha,hcar,hSafe⟩ := ok.pending p hp
+      have he := done p valid
+      rw [hground] at he
+      exact False.elim (ha (ParcelPosition.ground.inj he))
+  · apply Nat.eq_of_testBit_eq
+    intro p
+    rw [Nat.zero_testBit]
+    cases hp : held.testBit p
+    · rfl
+    · obtain ⟨valid,hheld,hs⟩ := ok.held p hp
+      have he := done p valid
+      rw [hheld] at he
+      cases he
+
+#print axioms route_ok_same
+#print axioms route_pickup_carrier
+#print axioms route_pickup_ok
+#print axioms route_delivery_ok
+#print axioms route_ok_count_le
+#print axioms route_goal_masks
+end IslandLogistics
