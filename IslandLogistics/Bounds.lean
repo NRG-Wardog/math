@@ -6405,11 +6405,11 @@ theorem local_route_contains (ids : List Nat) (sel : Nat → Bool) (p : Nat) :
     have hh : sel (ids.getD i 0) = true ∧ ids.getD i 0 = p := by
       simpa [localRouteMask,predMask_testBit,hi'] using hb
     have he : ids[i] = p := by simpa [hi'] using hh.2
-    exact ⟨List.mem_of_getElem he,by simpa [hh.2] using hh.1⟩
+    exact ⟨List.mem_of_getElem he,by rw [← hh.2]; exact hh.1⟩
   · rintro ⟨hp,hs⟩
     obtain ⟨i,hi,he⟩ := List.getElem_of_mem hp
     have hd : ids.getD i 0 = p := by simpa [hi] using he
-    exact ⟨i,List.mem_range.mpr hi,by simp [localRouteMask,predMask_testBit,hi,hd,hs]⟩
+    exact ⟨i,List.mem_range.mpr hi,by simp [localRouteMask,predMask_testBit,hi,he,hs]⟩
 
 def routeAssignedMask (w : World) {s u : State} {m h : Nat}
     (tr : LegalTrace w s u m h) (t : Nat) :=
@@ -6497,7 +6497,7 @@ theorem route_allocation_from_masks (mask : Nat → Nat) (row : Nat → Nat → 
     have tail := ih hd.2
     have tail' : RouteAllocation (ts.map row) ((mask t ||| routeMaskUnion mask ts) ^^^ mask t)
         ((ts.map (fun t => row t (mask t))).sum) := by rw [hx]; exact tail
-    have h := RouteAllocation.cons (Nat.le_of_testBit hs) (maskWithin_and hs) tail'
+    have h := RouteAllocation.cons (row := row t) (Nat.le_of_testBit hs) (maskWithin_and hs) tail'
     simpa [routeMaskUnion,Nat.add_comm] using h
 
 def routeLocalPick (w : World) (s : State) (ids : List Nat) (mask : Nat) :=
@@ -6561,8 +6561,7 @@ theorem trace_route_mask_eligible (w : World)
   have he : traceSelector w tr t p = true := by
     simpa [routeAssignedMask,localRouteMask,predMask_testBit,hi,p] using hb
   have hp : p ∈ activeParcels w s := by
-    apply List.mem_of_getElem (i := i)
-    simp [p,hi]
+    exact List.mem_of_getElem (h := hi) (by simp [p,hi])
   have hp' : p < w.parcels ∧ s.parcel p ≠ .ground (w.goal p) := by simpa [activeParcels] using hp
   obtain ⟨a,car,ha,fit,own⟩ := trace_carrier_exists w tr done vp vf p hp'.1 hp'.2
   have hcar := (trace_selector_owner w tr t ht p he).2.1
