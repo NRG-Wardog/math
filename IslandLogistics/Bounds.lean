@@ -4610,10 +4610,6 @@ theorem geo_parcel_update (r : GeoSpec w) (s : State) (p : Nat) (v : ParcelPosit
   simp only [geoState] at he ⊢
   rw [he]
   congr 1
-  funext t
-  by_cases ht : t < w.trucks
-  · cases hv : s.truck t <;> simp [ht,hv,geoTruck]
-  · simp [ht]
 
 theorem geo_ferry_update_keep (r : GeoSpec w) (s : State) (f b : Nat)
     (hf : f < w.ferries) (hk : r.keepF f = true) :
