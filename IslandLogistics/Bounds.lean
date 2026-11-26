@@ -359,10 +359,10 @@ def handling (w : World) (s : State) : Nat :=
 theorem handling_step (w : World) {s u : State} {m h : Nat}
     (st : Step w s u m h) : handling w s ≤ h + handling w u := by
   cases st with
-  | drive t a b ht hr valid => simp [handling, handleOne]
-  | board t f a ht hf hr room valid => simp [handling, handleOne]
-  | disembark t f ht valid => simp [handling, handleOne]
-  | sail f b hr hne valid => simp [handling, handleOne]
+  | drive t a b ht hr valid => exact Nat.le_refl _
+  | board t f a ht hf hr room valid => exact Nat.le_refl _
+  | disembark t f ht valid => exact Nat.le_refl _
+  | sail f b hr hne valid => exact Nat.le_refl _
   | load p t a hp ht room valid =>
     unfold handling
     apply sumN_one_change (p := p)
