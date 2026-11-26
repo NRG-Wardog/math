@@ -5047,3 +5047,243 @@ theorem geographic_portfolio_admissible (w : World) (sys : RoadCutSystem w)
 #print axioms geo_action_partition
 #print axioms geographic_portfolio_admissible
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Vertex cuts distinguish ground from aboard locations. This permits
+-- the exact same capacity grouping proof to count BOARD/DISEMBARK events.
+theorem vtx_parcel_side_change_carrier (w : World) (side : Vertex → Bool)
+    {s u : State} {m h : Nat} (st : Step w s u m h)
+    (vp : ValidParcelCarriers w s) (p : Nat) (hp : p < w.parcels)
+    (diff : side (parcelVertex s p) ≠ side (parcelVertex u p)) :
+    ∃ t, t < w.trucks ∧ s.parcel p = .onTruck t ∧ u.parcel p = .onTruck t := by
+  cases st with
+  | drive t a b ht hr valid =>
+    cases eq : s.parcel p with
+    | ground x => simp [parcelVertex,eq] at diff
+    | onTruck q => exact ⟨q,vp p hp q eq,rfl,rfl⟩
+  | board t f a ht hf hr room valid =>
+    cases eq : s.parcel p with
+    | ground x => simp [parcelVertex,eq] at diff
+    | onTruck q => exact ⟨q,vp p hp q eq,rfl,rfl⟩
+  | disembark t f ht valid =>
+    cases eq : s.parcel p with
+    | ground x => simp [parcelVertex,eq] at diff
+    | onTruck q => exact ⟨q,vp p hp q eq,rfl,rfl⟩
+  | sail f b hr hne valid =>
+    cases eq : s.parcel p with
+    | ground x => simp [parcelVertex,eq] at diff
+    | onTruck q => exact ⟨q,vp p hp q eq,rfl,rfl⟩
+  | load q t a hq ht room valid =>
+    by_cases eq : p = q
+    · subst q
+      simp [parcelVertex,truckVertex,setAt,hq,ht] at diff
+    · simp [parcelVertex,setAt,eq,truckVertex] at diff
+  | unload q t a hq ht valid =>
+    by_cases eq : p = q
+    · subst q
+      simp [parcelVertex,truckVertex,setAt,hq,ht] at diff
+    · simp [parcelVertex,setAt,eq,truckVertex] at diff
+
+def vtx_enteringTrucks (w : World) (side : Vertex → Bool) (s u : State) : List Nat :=
+  (List.range w.trucks).filter (fun t =>
+    !side (truckVertex s t) && side (truckVertex u t))
+
+theorem vtx_entering_parcel_owner (w : World) (side : Vertex → Bool)
+    {s u : State} {m h : Nat} (st : Step w s u m h)
+    (vp : ValidParcelCarriers w s) (p : Nat) (hp : p < w.parcels)
+    (outside : side (parcelVertex s p) = false)
+    (inside : side (parcelVertex u p) = true) :
+    sourceOwner s p ∈ vtx_enteringTrucks w side s u ∧
+      s.parcel p = .onTruck (sourceOwner s p) := by
+  have diff : side (parcelVertex s p) ≠ side (parcelVertex u p) := by
+    simp [outside,inside]
+  obtain ⟨t,valid,hs,hu⟩ := vtx_parcel_side_change_carrier w side st vp p hp diff
+  have ho : side (truckVertex s t) = false := by simpa [parcelVertex,hs] using outside
+  have hi : side (truckVertex u t) = true := by simpa [parcelVertex,hu] using inside
+  exact ⟨by simp [sourceOwner,hs,vtx_enteringTrucks,valid,ho,hi],by simp [sourceOwner,hs]⟩
+
+theorem vtx_legal_step_crossing_groups (w : World) (side : Vertex → Bool)
+    {s u : State} {m h : Nat} (st : Step w s u m h)
+    (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (sel : Nat → Bool)
+    (moves : ∀ p, p < w.parcels → sel p = true →
+      side (parcelVertex s p) = false ∧ side (parcelVertex u p) = true) :
+    ∃ groups : List (List Nat),
+      List.Perm (selectedWeights w sel) groups.flatten ∧
+      (∀ g ∈ groups, g.sum ≤ C) ∧
+      groups.length = (vtx_enteringTrucks w side s u).length := by
+  have owns : ∀ p, p < w.parcels → sel p = true →
+      sourceOwner s p ∈ vtx_enteringTrucks w side s u ∧
+      s.parcel p = .onTruck (sourceOwner s p) := by
+    intro p hp hs
+    exact vtx_entering_parcel_owner w side st vp p hp (moves p hp hs).1 (moves p hp hs).2
+  refine ⟨groupWeights w (sourceOwner s) (vtx_enteringTrucks w side s u) sel, ?_, ?_, ?_⟩
+  · exact groupWeights_perm w _ _ _ (fun p hp hs => (owns p hp hs).1)
+  · exact groupWeights_fit w s C _ _ _ vl cap
+      (fun t ht => List.mem_range.mp (List.mem_filter.mp ht).1)
+      (fun p hp hs => (owns p hp hs).2)
+  · exact groupWeights_length w _ _ _
+
+def vtx_leavingTrucks (w : World) (side : Vertex → Bool) (s u : State) : List Nat :=
+  vtx_enteringTrucks w (fun v => !side v) s u
+
+inductive vtx_FluxPath (w : World) (side : Vertex → Bool) :
+    State → State → Nat → Nat → Nat → Nat → Prop where
+  | nil (s : State) : vtx_FluxPath w side s s 0 0 0 0
+  | cons {s v u : State} {a b m h i o : Nat} :
+      Step w s v a b → vtx_FluxPath w side v u m h i o →
+      vtx_FluxPath w side s u (a+m) (b+h)
+        ((vtx_enteringTrucks w side s v).length+i)
+        ((vtx_leavingTrucks w side s v).length+o)
+
+theorem vtx_flux_from_path (w : World) (side : Vertex → Bool)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h) :
+    ∃ i o, vtx_FluxPath w side s u m h i o := by
+  induction path with
+  | nil s => exact ⟨0,0,vtx_FluxPath.nil s⟩
+  | cons st tail ih =>
+    obtain ⟨i,o,p⟩ := ih
+    exact ⟨_,_,vtx_FluxPath.cons st p⟩
+
+theorem vtx_flux_path_groups (w : World) (side : Vertex → Bool)
+    {s u : State} {m h i o : Nat} (path : vtx_FluxPath w side s u m h i o)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (sel : Nat → Bool)
+    (needs : ∀ p, p < w.parcels → sel p = true →
+      side (parcelVertex s p) = false ∧ side (.ground (w.goal p)) = true) :
+    ∃ groups : List (List Nat),
+      List.Perm (selectedWeights w sel) groups.flatten ∧
+      (∀ g ∈ groups, g.sum ≤ C) ∧ groups.length = i := by
+  induction path generalizing sel with
+  | nil s =>
+    have hfalse : ∀ p, p < w.parcels → sel p = false := by
+      intro p hp
+      cases hs : sel p with
+      | false => rfl
+      | true =>
+        have hh := needs p hp hs
+        have hd := done p hp
+        simp [parcelVertex,hd,hh.2] at hh
+    exact ⟨[],by simp [selectedWeight_empty w sel hfalse],by simp, rfl⟩
+  | @cons s v u a b m h i o st tail ih =>
+    let moved : Nat → Bool := fun p => sel p && side (parcelVertex v p)
+    let remain : Nat → Bool := fun p => sel p && !side (parcelVertex v p)
+    have moveCond : ∀ p, p < w.parcels → moved p = true →
+        side (parcelVertex s p) = false ∧ side (parcelVertex v p) = true := by
+      intro p hp hs
+      have hh : sel p = true ∧ side (parcelVertex v p) = true := by
+        simpa [moved] using hs
+      exact ⟨(needs p hp hh.1).1,hh.2⟩
+    have remCond : ∀ p, p < w.parcels → remain p = true →
+        side (parcelVertex v p) = false ∧ side (.ground (w.goal p)) = true := by
+      intro p hp hs
+      have hh : sel p = true ∧ side (parcelVertex v p) = false := by
+        simpa [remain] using hs
+      exact ⟨hh.2,(needs p hp hh.1).2⟩
+    obtain ⟨gs,pg,fg,lg⟩ := vtx_legal_step_crossing_groups w side st vl vp C cap moved moveCond
+    have vload := step_valid_load w st vl
+    have vowner := step_valid_parcel_carriers w st vp
+    have next : ∃ groups : List (List Nat),
+        List.Perm (selectedWeights w remain) groups.flatten ∧
+        (∀ g ∈ groups, g.sum ≤ C) ∧ groups.length = i := by
+      apply ih <;> assumption
+    obtain ⟨rs,pr,fr,lr⟩ := next
+    refine ⟨gs++rs,?_,?_,?_⟩
+    · have spl := selectedWeight_split w sel (fun p => side (parcelVertex v p))
+      have comb := List.Perm.append pg pr
+      rw [flatten_append_nat]
+      exact spl.trans comb
+    · intro g hg
+      rcases List.mem_append.mp hg with left | right
+      · exact fg g left
+      · exact fr g right
+    · simp [lg,lr]
+
+def vtx_inwardSelection (w : World) (side : Vertex → Bool) (s : State) : Nat → Bool :=
+  fun p => !side (parcelVertex s p) && side (.ground (w.goal p))
+
+def vtx_binInward (w : World) (side : Vertex → Bool) (s : State) (C : Nat) (seed : BinState) : Nat :=
+  let ws := selectedWeights w (vtx_inwardSelection w side s)
+  (binDP C seed ws.length ws).1
+
+theorem vtx_flux_inward_bin_bound (w : World) (side : Vertex → Bool)
+    {s u : State} {m h i o : Nat} (path : vtx_FluxPath w side s u m h i o)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (seed : BinState) :
+    vtx_binInward w side s C seed ≤ i := by
+  obtain ⟨gs,pg,fg,lg⟩ :=
+    vtx_flux_path_groups w side path done vl vp C cap (vtx_inwardSelection w side s)
+      (by intro p hp hs; simpa [vtx_inwardSelection] using hs)
+  have h := binDP_le_feasible_groups C seed _ gs pg fg
+  rw [lg] at h
+  exact h
+
+theorem vtx_flux_complement (w : World) (side : Vertex → Bool)
+    {s u : State} {m h i o : Nat} (path : vtx_FluxPath w side s u m h i o) :
+    vtx_FluxPath w (fun v => !side v) s u m h o i := by
+  induction path with
+  | nil s => exact vtx_FluxPath.nil s
+  | cons st tail ih =>
+    have h := vtx_FluxPath.cons st ih
+    simpa [vtx_leavingTrucks] using h
+
+def vtx_cutStockCount (w : World) (side : Vertex → Bool) (s : State) : Nat :=
+  sumN (fun t => if side (truckVertex s t) then 1 else 0) w.trucks
+
+theorem vtx_cut_stock_le (w : World) (side : Vertex → Bool) (s : State) :
+    vtx_cutStockCount w side s ≤ w.trucks := by
+  unfold vtx_cutStockCount
+  have h := sumN_mono (fun t => if side (truckVertex s t) then 1 else 0)
+    (fun _ => 1) w.trucks (by intro q hq; cases he : side (truckVertex s q) <;> simp [he])
+  have eq : sumN (fun _ => 1) w.trucks = w.trucks := by
+    induction w.trucks with
+    | zero => rfl
+    | succ n ih => simp [sumN,ih]
+  omega
+
+theorem vtx_step_flux_balance (w : World) (side : Vertex → Bool) (s u : State) :
+    (vtx_enteringTrucks w side s u).length + vtx_cutStockCount w side s =
+      (vtx_leavingTrucks w side s u).length + vtx_cutStockCount w side u := by
+  simp only [vtx_leavingTrucks,vtx_enteringTrucks,vtx_cutStockCount]
+  rw [filtered_count_eq_sum,filtered_count_eq_sum,← sumN_add,← sumN_add]
+  apply sumN_congr
+  intro t ht
+  cases hs : side (truckVertex s t) <;>
+    cases hu : side (truckVertex u t) <;> simp [hs,hu]
+
+theorem vtx_path_flux_balance (w : World) (side : Vertex → Bool)
+    {s u : State} {m h i o : Nat} (path : vtx_FluxPath w side s u m h i o) :
+    i + vtx_cutStockCount w side s = o + vtx_cutStockCount w side u := by
+  induction path with
+  | nil s => simp
+  | @cons s v u a b m h i o st tail ih =>
+    have hh := vtx_step_flux_balance w side s v
+    omega
+
+def vtx_traceIn (w : World) (side : Vertex → Bool)
+    {s u : State} {m h : Nat} : LegalTrace w s u m h → Nat
+  | .nil _ => 0
+  | @LegalTrace.cons _ s v u a b m h st tail =>
+    (vtx_enteringTrucks w side s v).length + vtx_traceIn w side tail
+
+def vtx_traceOut (w : World) (side : Vertex → Bool)
+    {s u : State} {m h : Nat} : LegalTrace w s u m h → Nat
+  | .nil _ => 0
+  | @LegalTrace.cons _ s v u a b m h st tail =>
+    (vtx_leavingTrucks w side s v).length + vtx_traceOut w side tail
+
+theorem vtx_trace_flux_path (w : World) (side : Vertex → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) :
+    vtx_FluxPath w side s u m h (vtx_traceIn w side tr) (vtx_traceOut w side tr) := by
+  induction tr with
+  | nil s => exact vtx_FluxPath.nil s
+  | cons st tail ih => exact vtx_FluxPath.cons st ih
+
+#print axioms vtx_flux_inward_bin_bound
+#print axioms vtx_path_flux_balance
+end IslandLogistics
