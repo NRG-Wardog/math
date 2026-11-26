@@ -6707,13 +6707,13 @@ theorem route_range_nodup (n : Nat) : (List.range n).Nodup := by
   | zero => simp
   | succ n ih =>
     rw [List.range_succ]
-    apply List.Nodup.append
-    · exact ih
-    · simp
-    · intro a ha hb
-      have e : a = n := by simpa using hb
-      have h := List.mem_range.mp ha
-      omega
+    change ((List.range n) ++ [n]).Pairwise (fun a b => a ≠ b)
+    rw [List.pairwise_append]
+    refine ⟨ih,by simp,?_⟩
+    intro a ha b hb
+    have e : b = n := by simpa using hb
+    have h := List.mem_range.mp ha
+    omega
 
 theorem trace_route_convolution_bound (w : World) (r : RouteData) (fmt : RouteFormat w r)
     (price : RouteTariff) (cert : RouteMetricCertificate w r price)
