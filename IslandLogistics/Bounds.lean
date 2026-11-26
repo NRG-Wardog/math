@@ -1752,7 +1752,7 @@ theorem path_assignment_valid (w : World) (s u : State) (flags : Nat → Bool)
       (ids.map (fun p => if flags p then 2 else 0)).sum := by
   induction pa with
   | nil => simp [selectedJobs,admissibleDigits,omittedPenalty]
-  | @omit p ps ds flag tail ih =>
+  | @«omit» p ps ds flag tail ih =>
     obtain ⟨hl,hv,hf,he⟩ := ih
     constructor
     · simp [hl]
@@ -1763,8 +1763,7 @@ theorem path_assignment_valid (w : World) (s u : State) (flags : Nat → Bool)
       · subst d; omega
       · exact hv d h
     constructor
-    · simp [selectedJobs,admissibleDigits,admissibleDigit,cl]
-      simpa [selectedJobs] using hf
+    · simpa [selectedJobs,admissibleDigits,admissibleDigit,cl] using hf
     · simp [omittedPenalty,flag,he]
   | @keep p ps ds t flag ht fit owner carrier tail ih =>
     obtain ⟨hl,hv,hf,he⟩ := ih
@@ -1794,12 +1793,18 @@ theorem path_assignment_valid (w : World) (s u : State) (flags : Nat → Bool)
 def activeParcels (w : World) (s : State) : List Nat :=
   (List.range w.parcels).filter (fun p => s.parcel p != .ground (w.goal p))
 
+theorem natListSum_append (xs ys : List Nat) :
+    (xs ++ ys).sum = xs.sum + ys.sum := by
+  induction xs with
+  | nil => simp
+  | cons x xs ih => simp [ih,Nat.add_assoc]
+
 theorem sum_range_eq_sumN (f : Nat → Nat) (n : Nat) :
     ((List.range n).map f).sum = sumN f n := by
   induction n with
   | zero => rfl
   | succ n ih =>
-    rw [List.range_succ,List.map_append,List.sum_append]
+    rw [List.range_succ,List.map_append,natListSum_append]
     simp [sumN,ih]
 
 theorem filtered_weight_le (xs : List Nat) (keep : Nat → Bool) (f : Nat → Nat) :
