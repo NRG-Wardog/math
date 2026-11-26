@@ -6843,14 +6843,14 @@ theorem route_mode_budget (w : World) (scale : Nat) (mode : RouteMode)
     constructor
     · omega
     · subst m
-      simp [routeModeTariff,Nat.add_mul,Nat.mul_comm,Nat.mul_left_comm,Nat.mul_assoc]
+      simp [routeModeTariff,Nat.add_mul,Nat.mul_add,Nat.mul_comm,Nat.mul_left_comm,Nat.mul_assoc]
   | zeroSail =>
     change extra ≤ 3*f at extraBound
     have hr : d+x ≤ m-extra := by omega
     have h := Nat.mul_le_mul_right scale hr
     constructor
     · omega
-    · simpa [routeModeTariff,Nat.add_mul,Nat.mul_comm] using h
+    · simpa [routeModeTariff,Nat.add_mul,Nat.mul_add,Nat.mul_comm] using h
   | roadOnly =>
     change extra ≤ x+3*f at extraBound
     have hr : d ≤ m-extra := by omega
