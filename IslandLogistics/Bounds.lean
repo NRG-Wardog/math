@@ -4609,6 +4609,11 @@ theorem geo_parcel_update (r : GeoSpec w) (s : State) (p : Nat) (v : ParcelPosit
     · simp [geoState,setAt,h]
   simp only [geoState] at he ⊢
   rw [he]
+  congr 1
+  funext t
+  by_cases ht : t < w.trucks
+  · cases hv : s.truck t <;> simp [ht,hv,geoTruck]
+  · simp [ht]
 
 theorem geo_ferry_update_keep (r : GeoSpec w) (s : State) (f b : Nat)
     (hf : f < w.ferries) (hk : r.keepF f = true) :
@@ -4686,10 +4691,12 @@ theorem geo_occ_dropped (r : GeoSpec w) (s : State) (f : Nat)
     (hk : r.keepF f = false) :
     occupancy r.world (geoState r s) f = 0 := by
   unfold occupancy
+  change sumN (fun t => if (geoState r s).truck t = .onFerry f then 1 else 0) w.trucks = 0
   have he := sumN_congr
     (fun t => if (geoState r s).truck t = .onFerry f then 1 else 0)
     (fun _ => 0) w.trucks (by
       intro t ht
+      change (if (geoState r s).truck t = .onFerry f then 1 else 0) = 0
       rw [geo_truck_at r s t ht]
       cases he : s.truck t with
       | land x => simp [geoTruck]
