@@ -241,7 +241,8 @@ theorem sail_projection (s : State) (p f b : Nat) :
 theorem project_step (w : World) {s u : State} {m h : Nat}
     (st : Step w s u m h) (p : Nat) : AStep w (project s p) (project u p) m := by
   cases st with
-  | drive s t a b ht hr valid =>
+  | drive t a b ht hr valid =>
+    rename_i s
     cases hp : s.parcel p with
     | ground x =>
       simpa [project, parcelVertex, hp] using
@@ -253,7 +254,8 @@ theorem project_step (w : World) {s u : State} {m h : Nat}
           (AStep.drive (w := w) s.ferry a b hr)
       · simpa [project, parcelVertex, hp, truckVertex, setAt, eq] using
           (AStep.stay (w := w) ⟨truckVertex s q, s.ferry⟩ 1)
-  | board s t f a ht hf hr room valid =>
+  | board t f a ht hf hr room valid =>
+    rename_i s
     cases hp : s.parcel p with
     | ground x =>
       simpa [project, parcelVertex, hp] using
@@ -265,7 +267,8 @@ theorem project_step (w : World) {s u : State} {m h : Nat}
           (AStep.board (w := w) s.ferry f)
       · simpa [project, parcelVertex, hp, truckVertex, setAt, eq] using
           (AStep.stay (w := w) ⟨truckVertex s q, s.ferry⟩ 1)
-  | disembark s t f ht valid =>
+  | disembark t f ht valid =>
+    rename_i s
     cases hp : s.parcel p with
     | ground x =>
       simpa [project, parcelVertex, hp] using
@@ -277,17 +280,20 @@ theorem project_step (w : World) {s u : State} {m h : Nat}
           (AStep.disembark (w := w) s.ferry f)
       · simpa [project, parcelVertex, hp, truckVertex, setAt, eq] using
           (AStep.stay (w := w) ⟨truckVertex s q, s.ferry⟩ 1)
-  | sail s f b hr hne valid =>
+  | sail f b hr hne valid =>
+    rename_i s
     rw [sail_projection]
     exact AStep.sail s.ferry (parcelVertex s p) f b hr hne
-  | load s q t a hp ht room valid =>
+  | load q t a hp ht room valid =>
+    rename_i s
     by_cases eq : p = q
     · subst p
       simpa [project, parcelVertex, hp, truckVertex, ht, setAt] using
         (AStep.stay (w := w) ⟨Vertex.ground a, s.ferry⟩ 0)
     · simpa [project, parcelVertex, setAt, eq, truckVertex] using
         (AStep.stay (w := w) (project s p) 0)
-  | unload s q t a hp ht valid =>
+  | unload q t a hp ht valid =>
+    rename_i s
     by_cases eq : p = q
     · subst p
       simpa [project, parcelVertex, hp, truckVertex, ht, setAt] using
@@ -307,7 +313,9 @@ theorem single_parcel_bound (w : World) (p : Nat) (hp : p < w.parcels)
     (fun s t a b st => edgeCertificate _ _ _ (project_step w st p)) path
   have hz : d (project u p) = 0 := by
     simpa [project, parcelVertex, goal p hp] using goalCertificate u.ferry
-  omega
+  change d (project s p) ≤ m + d (project u p) at hh
+  rw [hz, Nat.add_zero] at hh
+  exact hh
 
 #print axioms project_step
 #print axioms single_parcel_bound
