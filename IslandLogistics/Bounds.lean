@@ -7766,7 +7766,7 @@ structure HubPortTrace (p : HubPort) (k boats : Nat) where
   sailIn : tripsIn ≤ arrive*k
   initialStock : p.stock ≤ boats
   finalStock : finish ≤ boats
-  balance : depart+p.stock = arrive+finish
+  balance : depart+finish = arrive+p.stock
 
 theorem hub_port_inventory_bound (p : HubPort) (k boats : Nat)
     (positive : 0 < k) (t : HubPortTrace p k boats) :
@@ -7845,8 +7845,9 @@ theorem hub_choice_cost_bound {α : Type} (options : List (List α)) (choice : L
     (road fleet : List α → Nat) (top R F : Nat)
     (roadBound : road choice ≤ R) (fleetBound : fleet choice ≤ F) :
     exactCutMin top ((hubChoices options).map (fun c => road c+fleet c)) ≤ R+F := by
-  have hm := exactCutMin_le_member top _ (road choice+fleet choice)
-    (List.mem_map.mpr ⟨choice,hub_choices_complete witness,rfl⟩)
+  have hmem : road choice+fleet choice ∈ (hubChoices options).map (fun c => road c+fleet c) :=
+    List.mem_map.mpr ⟨choice,hub_choices_complete witness,rfl⟩
+  have hm := exactCutMin_le_member top _ _ hmem
   omega
 
 #print axioms hub_loop_erase
