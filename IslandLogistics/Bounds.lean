@@ -2691,3 +2691,163 @@ theorem concrete_cut_profile_bound (w : World) (side : Nat → Bool)
 #print axioms path_flux_balance
 #print axioms concrete_cut_profile_bound
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+theorem sumN_eq_zero_point (f : Nat → Nat) (n : Nat) (hz : sumN f n = 0)
+    (t : Nat) (ht : t < n) : f t = 0 := by
+  induction n with
+  | zero => omega
+  | succ n ih =>
+    simp only [sumN] at hz
+    by_cases e : t = n
+    · subst t; omega
+    · exact ih (by omega) (by omega)
+
+theorem no_trucks_in_side (w : World) (side : Nat → Bool) (s : State)
+    (hz : cutStockCount w side s = 0) (t : Nat) (ht : t < w.trucks) :
+    side (physicalTruck s t) = false := by
+  have he := sumN_eq_zero_point (fun q => if side (physicalTruck s q) then 1 else 0)
+    w.trucks hz t ht
+  cases h : side (physicalTruck s t) <;> simp [h] at he ⊢
+
+-- With no truck inside the side, no step can alter the status of a
+-- parcel at a specified ground location in that side.
+theorem step_preserves_unvisited_ground (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (st : Step w s u m h)
+    (hz : cutStockCount w side s = 0)
+    (p a : Nat) (ha : side a = true) :
+    s.parcel p = .ground a ↔ u.parcel p = .ground a := by
+  cases st with
+  | drive t b c ht hr valid => rfl
+  | board t f b ht hf hr room valid => rfl
+  | disembark t f ht valid => rfl
+  | sail f b hr hne valid => rfl
+  | load q t b hq ht room valid =>
+    have hb := no_trucks_in_side w side s hz t valid.2.1
+    have hb' : side b = false := by simpa [physicalTruck,ht] using hb
+    have hne : b ≠ a := by
+      intro e; subst b; rw [ha] at hb'; contradiction
+    by_cases ep : p = q
+    · subst p
+      simp [hq,setAt,hne]
+    · simp [setAt,ep]
+  | unload q t b hq ht valid =>
+    have hb := no_trucks_in_side w side s hz t valid.2.1
+    have hb' : side b = false := by simpa [physicalTruck,ht] using hb
+    have hne : b ≠ a := by
+      intro e; subst b; rw [ha] at hb'; contradiction
+    by_cases ep : p = q
+    · subst p
+      simp [hq,setAt,hne]
+    · simp [setAt,ep]
+
+theorem flux_no_entry_preserves_ground (w : World) (side : Nat → Bool)
+    {s u : State} {m h i o : Nat} (path : FluxPath w side s u m h i o)
+    (stock : cutStockCount w side s = 0) (hi : i = 0)
+    (p a : Nat) (ha : side a = true) :
+    s.parcel p = .ground a ↔ u.parcel p = .ground a := by
+  induction path with
+  | nil s => rfl
+  | @cons s v u a' b' m h i o st tail ih =>
+    have hb := step_flux_balance w side s v
+    have hv : cutStockCount w side v = 0 := by omega
+    exact (step_preserves_unvisited_ground w side st stock p a ha).trans
+      (ih hv (by omega))
+
+-- A necessary entry follows from actual active work, even when
+-- every selected parcel has source and goal on the same side.
+theorem visit_inside_required (w : World) (side : Nat → Bool)
+    {s u : State} {m h i o : Nat} (path : FluxPath w side s u m h i o)
+    (done : Goal w u) (vp : ValidParcelCarriers w s)
+    (stock : cutStockCount w side s = 0)
+    (p : Nat) (hp : p < w.parcels)
+    (active : s.parcel p ≠ .ground (w.goal p))
+    (work : side (physicalParcel s p) = true ∨ side (w.goal p) = true) :
+    1 ≤ i := by
+  by_cases hi : i = 0
+  · exfalso
+    rcases work with hs | hg
+    · cases he : s.parcel p with
+      | ground a =>
+        have ha : side a = true := by simpa [physicalParcel,he] using hs
+        have hstay := (flux_no_entry_preserves_ground w side path stock hi p a ha).mp he
+        have hgoal := done p hp
+        rw [hgoal] at hstay
+        have ea : w.goal p = a := by simpa using hstay
+        exact active (by simpa [ea] using he)
+      | onTruck t =>
+        have ht := vp p hp t he
+        have hn := no_trucks_in_side w side s stock t ht
+        simpa [physicalParcel,he,hn] using hs
+    · exact active ((flux_no_entry_preserves_ground w side path stock hi p (w.goal p) hg).mpr (done p hp))
+  · omega
+
+theorem stock_complement (w : World) (side : Nat → Bool) (s : State) :
+    cutStockCount w side s + cutStockCount w (fun v => !side v) s = w.trucks := by
+  unfold cutStockCount
+  rw [← sumN_add]
+  have hh := sumN_congr
+    (fun t => (if side (physicalTruck s t) then 1 else 0) +
+      (if !side (physicalTruck s t) then 1 else 0))
+    (fun _ => 1) w.trucks (by
+      intro t ht; cases he : side (physicalTruck s t) <;> simp [he])
+  rw [hh]
+  induction w.trucks with
+  | zero => rfl
+  | succ n ih => simp [sumN,ih]
+
+def sideWork (w : World) (side : Nat → Bool) (s : State) : Prop :=
+  ∃ p, p < w.parcels ∧ s.parcel p ≠ .ground (w.goal p) ∧
+    (side (physicalParcel s p) = true ∨ side (w.goal p) = true)
+
+noncomputable def visitInward (w : World) (side : Nat → Bool) (s : State)
+    (C : Nat) (seed : BinState) : Nat := by
+  classical
+  exact if cutStockCount w side s = 0 ∧ sideWork w side s
+    then max (binInward w side s C seed) 1 else binInward w side s C seed
+
+theorem visit_inward_bound (w : World) (side : Nat → Bool)
+    {s u : State} {m h i o : Nat} (path : FluxPath w side s u m h i o)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (seed : BinState) :
+    visitInward w side s C seed ≤ i := by
+  classical
+  have hb := flux_inward_bin_bound w side path done vl vp C cap seed
+  unfold visitInward
+  split
+  · rename_i hh
+    obtain ⟨p,hp,ha,hw⟩ := hh.2
+    have hv := visit_inside_required w side path done vp hh.1 p hp ha hw
+    omega
+  · exact hb
+
+-- Both forced visit maxima from the real Python cut profile are included.
+-- The conditional final stock formula is stated over signed integers so
+-- final-stock subtraction has exactly the Python meaning.
+theorem concrete_visit_cut_profile_bound (w : World) (side : Nat → Bool)
+    {s u : State} {m h i o : Nat} (path : FluxPath w side s u m h i o)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (seed : BinState) :
+    let I := visitInward w side s C seed
+    let O := visitInward w (fun v => !side v) s C seed
+    let k := cutStockCount w side s
+    let f := cutStockCount w side u
+    max (2*(I : Int)-((f : Int)-k)) (2*(O : Int)+((f : Int)-k)) ≤ (i : Int)+o ∧
+    max (I+O) (max (2*I-(w.trucks-k)) (2*O-k)) ≤ i+o := by
+  have hi := visit_inward_bound w side path done vl vp C cap seed
+  have ho := visit_inward_bound w (fun v => !side v) (flux_complement w side path) done vl vp C cap seed
+  have hb := path_flux_balance w side path
+  have hs := cut_stock_le w side s
+  have hu := cut_stock_le w side u
+  dsimp
+  omega
+
+#print axioms visit_inside_required
+#print axioms stock_complement
+#print axioms concrete_visit_cut_profile_bound
+
+end IslandLogistics
