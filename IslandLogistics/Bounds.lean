@@ -812,3 +812,209 @@ theorem disconnected_phantom_exact :
 #print axioms disconnected_phantom_crossings
 #print axioms disconnected_phantom_exact
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+def physicalTruck (s : State) (t : Nat) : Nat :=
+  match s.truck t with
+  | .land a => a
+  | .onFerry f => s.ferry f
+
+def physicalParcel (s : State) (p : Nat) : Nat :=
+  match s.parcel p with
+  | .ground a => a
+  | .onTruck t => physicalTruck s t
+
+-- Transport components are fixed by roads and *usable* ferry routes.
+-- The assumptions below state precisely that the computed component map
+-- is constant on those links. They do not assume anything about h or h*.
+structure ComponentLabels (w : World) where
+  label : Nat → Nat
+  roads : ∀ a b, w.road a b → label a = label b
+  ferry : ∀ f a b, 0 < w.slots f → w.route f a → w.route f b →
+    label a = label b
+
+def ValidFerries (w : World) (s : State) : Prop :=
+  ∀ f, f < w.ferries → w.route f (s.ferry f)
+
+def ValidTruckCarriers (w : World) (s : State) : Prop :=
+  ∀ t, t < w.trucks → ∀ f, s.truck t = .onFerry f →
+    f < w.ferries ∧ 0 < w.slots f
+
+def ValidParcelCarriers (w : World) (s : State) : Prop :=
+  ∀ p, p < w.parcels → ∀ t, s.parcel p = .onTruck t → t < w.trucks
+
+theorem step_valid_ferries (w : World) {s u : State} {m h : Nat}
+    (st : Step w s u m h) (v : ValidFerries w s) : ValidFerries w u := by
+  cases st with
+  | sail f b hr hne valid =>
+    intro g hg
+    change w.route g (setAt s.ferry f b g)
+    by_cases eq : g = f
+    · subst g
+      simpa [setAt] using hr
+    · simpa [setAt, eq] using v g hg
+  | drive t a b ht hr valid => exact v
+  | board t f a ht hf hr room valid => exact v
+  | disembark t f ht valid => exact v
+  | load p t a hp ht room valid => exact v
+  | unload p t a hp ht valid => exact v
+
+theorem step_valid_truck_carriers (w : World) {s u : State} {m h : Nat}
+    (st : Step w s u m h) (v : ValidTruckCarriers w s) :
+    ValidTruckCarriers w u := by
+  cases st with
+  | drive t a b ht hr valid =>
+    intro q hq f hf
+    change setAt s.truck t (.land b) q = .onFerry f at hf
+    by_cases eq : q = t
+    · subst q
+      simp [setAt] at hf
+    · exact v q hq f (by simpa [setAt, eq] using hf)
+  | board t f a ht hf hr room valid =>
+    intro q hq g hg
+    change setAt s.truck t (.onFerry f) q = .onFerry g at hg
+    by_cases eq : q = t
+    · subst q
+      have he : f = g := by simpa [setAt] using hg
+      subst g
+      exact ⟨valid.2.1, by omega⟩
+    · exact v q hq g (by simpa [setAt, eq] using hg)
+  | disembark t f ht valid =>
+    intro q hq g hg
+    change setAt s.truck t (.land (s.ferry f)) q = .onFerry g at hg
+    by_cases eq : q = t
+    · subst q
+      simp [setAt] at hg
+    · exact v q hq g (by simpa [setAt, eq] using hg)
+  | sail f b hr hne valid => exact v
+  | load p t a hp ht room valid => exact v
+  | unload p t a hp ht valid => exact v
+
+theorem step_valid_parcel_carriers (w : World) {s u : State} {m h : Nat}
+    (st : Step w s u m h) (v : ValidParcelCarriers w s) :
+    ValidParcelCarriers w u := by
+  cases st with
+  | load p t a hp ht room valid =>
+    intro q hq z hz
+    change setAt s.parcel p (.onTruck t) q = .onTruck z at hz
+    by_cases eq : q = p
+    · subst q
+      have he : t = z := by simpa [setAt] using hz
+      subst z
+      exact valid.2.1
+    · exact v q hq z (by simpa [setAt, eq] using hz)
+  | unload p t a hp ht valid =>
+    intro q hq z hz
+    change setAt s.parcel p (.ground a) q = .onTruck z at hz
+    by_cases eq : q = p
+    · subst q
+      simp [setAt] at hz
+    · exact v q hq z (by simpa [setAt, eq] using hz)
+  | drive t a b ht hr valid => exact v
+  | board t f a ht hf hr room valid => exact v
+  | disembark t f ht valid => exact v
+  | sail f b hr hne valid => exact v
+
+theorem step_truck_component (w : World) (c : ComponentLabels w)
+    {s u : State} {m h : Nat} (st : Step w s u m h)
+    (vf : ValidFerries w s) (vt : ValidTruckCarriers w s)
+    (q : Nat) (hq : q < w.trucks) :
+    c.label (physicalTruck s q) = c.label (physicalTruck u q) := by
+  cases st with
+  | drive t a b ht hr valid =>
+    by_cases eq : q = t
+    · subst q
+      simpa [physicalTruck, ht, setAt] using c.roads a b hr
+    · simp [physicalTruck, setAt, eq]
+  | board t f a ht hf hr room valid =>
+    by_cases eq : q = t
+    · subst q
+      simp [physicalTruck, ht, hf, setAt]
+    · simp [physicalTruck, setAt, eq]
+  | disembark t f ht valid =>
+    by_cases eq : q = t
+    · subst q
+      simp [physicalTruck, ht, setAt]
+    · simp [physicalTruck, setAt, eq]
+  | sail f b hr hne valid =>
+    cases hq' : s.truck q with
+    | land a => simp [physicalTruck, hq']
+    | onFerry g =>
+      by_cases eq : g = f
+      · subst g
+        have hh := vt q hq f hq'
+        simpa [physicalTruck, hq', setAt] using
+          c.ferry f (s.ferry f) b hh.2 (vf f hh.1) hr
+      · simp [physicalTruck, hq', setAt, eq]
+  | load p t a hp ht room valid => rfl
+  | unload p t a hp ht valid => rfl
+
+theorem step_parcel_component (w : World) (c : ComponentLabels w)
+    {s u : State} {m h : Nat} (st : Step w s u m h)
+    (vf : ValidFerries w s) (vt : ValidTruckCarriers w s)
+    (vp : ValidParcelCarriers w s)
+    (q : Nat) (hq : q < w.parcels) :
+    c.label (physicalParcel s q) = c.label (physicalParcel u q) := by
+  have hh := step_truck_component w c st vf vt
+  cases st with
+  | drive t a b ht hr valid =>
+    cases hp : s.parcel q with
+    | ground x => simp [physicalParcel, hp]
+    | onTruck z => simpa [physicalParcel, hp] using hh z (vp q hq z hp)
+  | board t f a ht hf hr room valid =>
+    cases hp : s.parcel q with
+    | ground x => simp [physicalParcel, hp]
+    | onTruck z => simpa [physicalParcel, hp] using hh z (vp q hq z hp)
+  | disembark t f ht valid =>
+    cases hp : s.parcel q with
+    | ground x => simp [physicalParcel, hp]
+    | onTruck z => simpa [physicalParcel, hp] using hh z (vp q hq z hp)
+  | sail f b hr hne valid =>
+    cases hp : s.parcel q with
+    | ground x => simp [physicalParcel, hp]
+    | onTruck z => simpa [physicalParcel, hp] using hh z (vp q hq z hp)
+  | load p t a hp ht room valid =>
+    by_cases eq : q = p
+    · subst q
+      simp [physicalParcel, physicalTruck, hp, ht, setAt]
+    · simp [physicalParcel, physicalTruck, setAt, eq]
+  | unload p t a hp ht valid =>
+    by_cases eq : q = p
+    · subst q
+      simp [physicalParcel, physicalTruck, hp, ht, setAt]
+    · simp [physicalParcel, physicalTruck, setAt, eq]
+
+theorem path_component_invariant (w : World) (c : ComponentLabels w)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h)
+    (vf : ValidFerries w s) (vt : ValidTruckCarriers w s)
+    (vp : ValidParcelCarriers w s) :
+    (∀ q, q < w.trucks →
+      c.label (physicalTruck s q) = c.label (physicalTruck u q)) ∧
+    (∀ q, q < w.parcels →
+      c.label (physicalParcel s q) = c.label (physicalParcel u q)) := by
+  induction path with
+  | nil s => exact ⟨fun _ _ => rfl, fun _ _ => rfl⟩
+  | cons st rest ih =>
+    have next := ih (step_valid_ferries w st vf)
+      (step_valid_truck_carriers w st vt) (step_valid_parcel_carriers w st vp)
+    exact ⟨fun q hq => (step_truck_component w c st vf vt q hq).trans (next.1 q hq),
+      fun q hq => (step_parcel_component w c st vf vt vp q hq).trans (next.2 q hq)⟩
+
+def componentStock (w : World) (c : ComponentLabels w) (s : State) (k : Nat) :=
+  sumN (fun t => if c.label (physicalTruck s t) = k then 1 else 0) w.trucks
+
+theorem reachable_stock_eq (w : World) (c : ComponentLabels w)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h)
+    (vf : ValidFerries w s) (vt : ValidTruckCarriers w s)
+    (vp : ValidParcelCarriers w s) (k : Nat) :
+    componentStock w c s k = componentStock w c u k := by
+  apply sumN_congr
+  intro t ht
+  rw [(path_component_invariant w c path vf vt vp).1 t ht]
+
+#print axioms path_component_invariant
+#print axioms reachable_stock_eq
+
+end IslandLogistics
