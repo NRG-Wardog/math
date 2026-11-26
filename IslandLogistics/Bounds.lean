@@ -3264,3 +3264,129 @@ theorem trace_assigned_bin_bound (w : World) (side : Nat → Bool) (t : Nat)
 #print axioms trace_assigned_groups
 #print axioms trace_assigned_bin_bound
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+theorem truck_zero_entry_outside (side : Nat → Bool) (t : Nat) (s v : State)
+    (hs : side (physicalTruck s t) = false) (hz : truckIn side t s v = 0) :
+    side (physicalTruck v t) = false := by
+  cases hv : side (physicalTruck v t) <;> simp_all [truckIn]
+
+-- If an assigned truck starts outside and never enters, its direct job
+-- cannot have any active work inside. This does not assume a trip count.
+theorem assigned_no_entry_no_inside_work (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (done : Goal w u) (p t : Nat) (hp : p < w.parcels)
+    (active : s.parcel p ≠ .ground (w.goal p))
+    (owner : traceCarrier w tr p = some t) (safe : traceSafe w tr p)
+    (outside : side (physicalTruck s t) = false)
+    (hz : traceTruckIn w side t tr = 0) :
+    side (physicalParcel s p) = false ∧ side (w.goal p) = false := by
+  induction tr with
+  | nil s => exact False.elim (active (done p hp))
+  | @cons s v u a b m h st tail ih =>
+    change truckIn side t s v + traceTruckIn w side t tail = 0 at hz
+    change extraOne w s v p = 0 ∧ traceSafe w tail p at safe
+    have hv := truck_zero_entry_outside side t s v outside (by omega)
+    have hz' : traceTruckIn w side t tail = 0 := by omega
+    cases hpos : s.parcel p with
+    | ground x =>
+      rcases ground_job_step w p x st hpos with same | pickup
+      · have av : v.parcel p ≠ .ground (w.goal p) := by
+          rw [same]; intro e; exact active (hpos.trans e)
+        have own : traceCarrier w tail p = some t :=
+          (traceCarrier_tail_active w st tail p safe.1 av).symm.trans owner
+        have hh := ih done av own safe.2 hv hz'
+        simpa [physicalParcel,hpos,same] using hh
+      · obtain ⟨q,held,truck,valid,fit,hm,hh⟩ := pickup
+        have av : v.parcel p ≠ .ground (w.goal p) := by simp [held]
+        have own : traceCarrier w tail p = some t :=
+          (traceCarrier_tail_active w st tail p safe.1 av).symm.trans owner
+        have hq := traceCarrier_held w tail p q held
+        rw [own] at hq
+        have eq := Option.some.inj hq
+        subst q
+        have hx : side x = false := by simpa [physicalTruck,truck] using outside
+        have res := ih done av own safe.2 hv hz'
+        exact ⟨by simp [physicalParcel,hpos,hx],res.2⟩
+    | onTruck q =>
+      have he := traceCarrier_held w (LegalTrace.cons st tail) p q hpos
+      rw [owner] at he
+      have eq := Option.some.inj he
+      subst q
+      have hsrc : side (physicalParcel s p) = false := by
+        simpa [physicalParcel,hpos] using outside
+      rcases held_job_step w p t st hpos safe.1 with hold | delivered
+      · have av : v.parcel p ≠ .ground (w.goal p) := by simp [hold]
+        have own := traceCarrier_held w tail p t hold
+        exact ⟨hsrc,(ih done av own safe.2 hv hz').2⟩
+      · have hg : side (w.goal p) = false := by
+          simpa [physicalTruck,delivered.2.1] using outside
+        exact ⟨hsrc,hg⟩
+
+theorem assigned_visit_inside_required (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (done : Goal w u) (p t : Nat) (hp : p < w.parcels)
+    (active : s.parcel p ≠ .ground (w.goal p))
+    (owner : traceCarrier w tr p = some t) (safe : traceSafe w tr p)
+    (outside : side (physicalTruck s t) = false)
+    (work : side (physicalParcel s p) = true ∨ side (w.goal p) = true) :
+    1 ≤ traceTruckIn w side t tr := by
+  by_cases hz : traceTruckIn w side t tr = 0
+  · have hh := assigned_no_entry_no_inside_work w side tr done p t hp active owner safe outside hz
+    simp [hh.1,hh.2] at work
+  · omega
+
+def assignedInwardSelection (w : World) (side : Nat → Bool) (s : State)
+    (sel : Nat → Bool) : Nat → Bool :=
+  fun p => sel p && inwardSelection w side s p
+
+def assignedBinInward (w : World) (side : Nat → Bool) (s : State)
+    (t : Nat) (sel : Nat → Bool) (seed : BinState) : Nat :=
+  let ws := selectedWeights w (assignedInwardSelection w side s sel)
+  (binDP (w.capacity t) seed ws.length ws).1
+
+def assignedWork (w : World) (side : Nat → Bool) (s : State) (sel : Nat → Bool) : Prop :=
+  ∃ p, p < w.parcels ∧ sel p = true ∧
+    (side (physicalParcel s p) = true ∨ side (w.goal p) = true)
+
+noncomputable def assignedVisitInward (w : World) (side : Nat → Bool) (s : State)
+    (t : Nat) (sel : Nat → Bool) (seed : BinState) : Nat := by
+  classical
+  exact if side (physicalTruck s t) = false ∧ assignedWork w side s sel
+    then max 1 (assignedBinInward w side s t sel seed)
+    else assignedBinInward w side s t sel seed
+
+theorem assigned_visit_bin_bound (w : World) (side : Nat → Bool) (t : Nat)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (ht : t < w.trucks) (sel : Nat → Bool)
+    (owners : ∀ p, p < w.parcels → sel p = true →
+      s.parcel p ≠ .ground (w.goal p) ∧ traceCarrier w tr p = some t ∧ traceSafe w tr p)
+    (seed : BinState) :
+    assignedVisitInward w side s t sel seed ≤ traceTruckIn w side t tr := by
+  classical
+  have hb : assignedBinInward w side s t sel seed ≤ traceTruckIn w side t tr := by
+    apply trace_assigned_bin_bound w side t tr done vl vp ht
+    · intro p hp hs
+      have hh : sel p = true ∧ side (physicalParcel s p) = false ∧ side (w.goal p) = true := by
+        simpa [assignedInwardSelection,inwardSelection, Bool.and_assoc] using hs
+      exact (owners p hp hh.1).2
+    · intro p hp hs
+      have hh : sel p = true ∧ side (physicalParcel s p) = false ∧ side (w.goal p) = true := by
+        simpa [assignedInwardSelection,inwardSelection, Bool.and_assoc] using hs
+      exact hh.2
+  unfold assignedVisitInward
+  split
+  · rename_i hh
+    obtain ⟨p,hp,hs,hw⟩ := hh.2
+    obtain ⟨ha,ho,hsafe⟩ := owners p hp hs
+    have hv := assigned_visit_inside_required w side tr done p t hp ha ho hsafe hh.1 hw
+    omega
+  · exact hb
+
+#print axioms assigned_no_entry_no_inside_work
+#print axioms assigned_visit_inside_required
+#print axioms assigned_visit_bin_bound
+end IslandLogistics
