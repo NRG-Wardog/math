@@ -2780,7 +2780,7 @@ theorem visit_inside_required (w : World) (side : Nat → Bool)
       | onTruck t =>
         have ht := vp p hp t he
         have hn := no_trucks_in_side w side s stock t ht
-        simpa [physicalParcel,he,hn] using hs
+        simp [physicalParcel,he,hn] at hs
     · exact active ((flux_no_entry_preserves_ground w side path stock hi p (w.goal p) hg).mpr (done p hp))
   · omega
 
