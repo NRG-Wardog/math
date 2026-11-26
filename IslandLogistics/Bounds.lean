@@ -6797,3 +6797,87 @@ theorem route_transfer_estimate_bound (w : World) (r : RouteData) (fmt : RouteFo
 #print axioms trace_route_convolution_bound
 #print axioms route_transfer_estimate_bound
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+inductive RouteMode where
+  | full
+  | zeroSail
+  | roadOnly
+
+def routeModeTariff (scale : Nat) (slots : Nat → Nat) : RouteMode → RouteTariff
+  | .full => ⟨scale,scale,3*scale,fun f => (3*scale)/(slots f)⟩
+  | .zeroSail => ⟨scale,scale,0,fun _ => 0⟩
+  | .roadOnly => ⟨scale,0,0,fun _ => 0⟩
+
+def routeComplement : RouteMode → Nat → Nat → Nat
+  | .full, _, _ => 0
+  | .zeroSail, _, f => 3*f
+  | .roadOnly, x, f => x+3*f
+
+-- The slot allocation uses the exact downward division of the Python
+-- movement metric. No divisibility or LCM assumption is necessary.
+theorem route_tariff_slots (w : World) (scale : Nat) (mode : RouteMode) (f : Nat) :
+    w.slots f * (routeModeTariff scale w.slots mode).perSail f ≤
+      (routeModeTariff scale w.slots mode).sail := by
+  cases mode with
+  | full =>
+    change w.slots f * (3*scale / w.slots f) ≤ 3*scale
+    rw [Nat.mul_comm]
+    exact Nat.div_mul_le_self _ _
+  | zeroSail => simp [routeModeTariff]
+  | roadOnly => simp [routeModeTariff]
+
+theorem route_mode_budget (w : World) (scale : Nat) (mode : RouteMode)
+    (d x f m extra : Nat) (movement : m = d+x+3*f)
+    (extraBound : extra ≤ routeComplement mode x f) :
+    extra ≤ m ∧
+    (routeModeTariff scale w.slots mode).drive*d +
+      (routeModeTariff scale w.slots mode).service*x +
+      (routeModeTariff scale w.slots mode).sail*f ≤ (m-extra)*scale := by
+  cases mode with
+  | full =>
+    simp [routeComplement] at extraBound
+    subst extra
+    constructor
+    · omega
+    · subst m
+      simp [routeModeTariff,Nat.add_mul,Nat.mul_comm,Nat.mul_left_comm,Nat.mul_assoc]
+  | zeroSail =>
+    change extra ≤ 3*f at extraBound
+    have hr : d+x ≤ m-extra := by omega
+    have h := Nat.mul_le_mul_right scale hr
+    constructor
+    · omega
+    · simpa [routeModeTariff,Nat.add_mul,Nat.mul_comm] using h
+  | roadOnly =>
+    change extra ≤ x+3*f at extraBound
+    have hr : d ≤ m-extra := by omega
+    have h := Nat.mul_le_mul_right scale hr
+    constructor
+    · omega
+    · simpa [routeModeTariff,Nat.mul_comm] using h
+
+-- Complete path inequality for the scalar route relaxation (all three
+-- tariffs), including exact subset convolution, cardinality minima,
+-- transfer penalties and the independent complementary budget.
+theorem route_mode_transfer_admissible (w : World) (r : RouteData) (fmt : RouteFormat w r)
+    (mode : RouteMode) (scale : Nat)
+    (cert : RouteMetricCertificate w r (routeModeTariff scale w.slots mode))
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) {d x f : Nat}
+    (counts : TraceCounts w tr d x f) (done : Goal w u)
+    (sources : ∀ p a, s.parcel p = .ground a → r.source p = .ground a)
+    (v : CarrierInvariant w s)
+    (top baseMove extra : Nat) (hs : 0 < scale) (base : baseMove ≤ m)
+    (extraBound : extra ≤ routeComplement mode x f) :
+    routeTransferEstimate w r s top scale baseMove extra ≤ m+h := by
+  have hb := route_mode_budget w scale mode d x f m extra
+    (trace_count_movement w counts) extraBound
+  exact route_transfer_estimate_bound w r fmt _ cert counts done sources
+    v.ferries v.occupancy v.parcels v.fit top scale baseMove extra hs base hb.1 hb.2
+
+#print axioms route_tariff_slots
+#print axioms route_mode_budget
+#print axioms route_mode_transfer_admissible
+end IslandLogistics
