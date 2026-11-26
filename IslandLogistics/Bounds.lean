@@ -5957,3 +5957,193 @@ theorem route_goal_masks (w : World) (r : RouteData) (t : Nat)
 #print axioms route_ok_count_le
 #print axioms route_goal_masks
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+def traceRouteCost (w : World) (r : RouteData) (t : Nat)
+    {s u : State} {m h : Nat} : LegalTrace w s u m h → Nat
+  | .nil _ => 0
+  | @LegalTrace.cons _ s v u a b m h st tail =>
+    r.dist (truckVertex s t) (truckVertex v t) + traceRouteCost w r t tail
+
+theorem nonempty_mask_pair (pick held p : Nat)
+    (hp : pick.testBit p = true ∨ held.testBit p = true) :
+    ¬ (pick = 0 ∧ held = 0) := by
+  intro e
+  rcases e with ⟨rfl,rfl⟩
+  simp at hp
+
+-- Extend a route witness for the legal suffix by an unrelated real
+-- primitive. Only the carrier's true relaxed movement is charged.
+theorem route_extend_same (w : World) (r : RouteData) (t pick held : Nat)
+    {s v u : State} {a b m h : Nat} (st : Step w s v a b) (tail : LegalTrace w v u m h)
+    (ok : RouteOK w r t (LegalTrace.cons st tail) pick held)
+    (same : ∀ p, pick.testBit p = true ∨ held.testBit p = true → v.parcel p = s.parcel p)
+    (cont : ∀ pk hd, RouteOK w r t tail pk hd →
+      RouteExecution r (w.capacity t) (truckVertex v t) pk hd
+        (routeCount r pk hd) (traceRouteCost w r t tail)) :
+    RouteExecution r (w.capacity t) (truckVertex s t) pick held
+      (routeCount r pick held) (traceRouteCost w r t (LegalTrace.cons st tail)) := by
+  exact RouteExecution.travel (Nat.le_refl _) (cont pick held (route_ok_same w r t pick held st tail ok same))
+
+theorem route_extend_pickup (w : World) (r : RouteData) (fmt : RouteFormat w r)
+    (t p a pick held : Nat) {s u : State} {m h : Nat}
+    (hp : s.parcel p = .ground a) (ht : s.truck t = .land a)
+    (room : load w s t + w.weight p ≤ w.capacity t)
+    (valid : p < w.parcels ∧ t < w.trucks ∧ a < w.locations)
+    (tail : LegalTrace w {s with parcel := setAt s.parcel p (.onTruck t)} u m h)
+    (ok : RouteOK w r t (LegalTrace.cons (Step.load s p t a hp ht room valid) tail) pick held)
+    (selected : pick.testBit p = true)
+    (cont : ∀ pk hd, RouteOK w r t tail pk hd →
+      RouteExecution r (w.capacity t)
+        (truckVertex {s with parcel := setAt s.parcel p (.onTruck t)} t)
+        pk hd (routeCount r pk hd) (traceRouteCost w r t tail)) :
+    RouteExecution r (w.capacity t) (truckVertex s t) pick held
+      (routeCount r pick held)
+      (traceRouteCost w r t (LegalTrace.cons (Step.load s p t a hp ht room valid) tail)) := by
+  obtain ⟨hp',x,hground,hsource,hactive,hcarrier,hsafe⟩ := ok.pending p selected
+  have he : x = a := ParcelPosition.ground.inj (hground.symm.trans hp)
+  subst x
+  have hload := route_load_le_real w r fmt t ok
+  have hfit : r.weight p ≤ w.capacity t - routeLoad r held := by
+    rw [fmt.weights]
+    omega
+  have hpR : p < r.parcels := by rw [fmt.count]; exact valid.1
+  have hc := route_pickup_count r pick held p hpR selected (route_ok_disjoint w r t ok p selected)
+  have ev := route_event_pickup r (w.capacity t) pick held p hpR selected hfit
+  have loc : truckVertex {s with parcel := setAt s.parcel p (.onTruck t)} t = r.source p := by
+    simp [truckVertex,ht,hsource]
+  have member :
+      (truckVertex {s with parcel := setAt s.parcel p (.onTruck t)} t,
+        pick ^^^ 2^p,held ||| 2^p) ∈ routeEvents r (w.capacity t) pick held := by
+    rw [loc]
+    exact ev
+  have next := cont _ _ (route_pickup_ok w r t p a pick held hp ht room valid tail ok selected)
+  have serv := RouteExecution.service (nonempty_mask_pair pick held p (Or.inl selected)) member next
+  rw [← hc] at serv
+  exact RouteExecution.travel (Nat.le_refl _) serv
+
+theorem route_extend_delivery (w : World) (r : RouteData) (fmt : RouteFormat w r)
+    (t p a pick held : Nat) {s u : State} {m h : Nat}
+    (hp : s.parcel p = .onTruck t) (ht : s.truck t = .land a)
+    (valid : p < w.parcels ∧ t < w.trucks ∧ a < w.locations)
+    (tail : LegalTrace w {s with parcel := setAt s.parcel p (.ground a)} u m h)
+    (ok : RouteOK w r t (LegalTrace.cons (Step.unload s p t a hp ht valid) tail) pick held)
+    (selected : held.testBit p = true)
+    (cont : ∀ pk hd, RouteOK w r t tail pk hd →
+      RouteExecution r (w.capacity t)
+        (truckVertex {s with parcel := setAt s.parcel p (.ground a)} t)
+        pk hd (routeCount r pk hd) (traceRouteCost w r t tail)) :
+    RouteExecution r (w.capacity t) (truckVertex s t) pick held
+      (routeCount r pick held)
+      (traceRouteCost w r t (LegalTrace.cons (Step.unload s p t a hp ht valid) tail)) := by
+  have hsafe := (ok.held p selected).2.2.1
+  have ha : a = w.goal p := by
+    by_cases e : a = w.goal p
+    · exact e
+    · simp [extraOne,hp,setAt,e] at hsafe
+  have hpR : p < r.parcels := by rw [fmt.count]; exact valid.1
+  have hc := route_delivery_count r pick held p hpR selected
+  have ev := route_event_delivery r (w.capacity t) pick held p hpR selected
+  have loc : truckVertex {s with parcel := setAt s.parcel p (.ground a)} t = r.target p := by
+    simp [truckVertex,ht,ha,fmt.targets]
+  have member :
+      (truckVertex {s with parcel := setAt s.parcel p (.ground a)} t,pick,held ^^^ 2^p) ∈
+        routeEvents r (w.capacity t) pick held := by
+    rw [loc]
+    exact ev
+  have next := cont _ _ (route_delivery_ok w r t p a pick held hp ht valid tail ok selected)
+  have serv := RouteExecution.service (nonempty_mask_pair pick held p (Or.inr selected)) member next
+  rw [← hc] at serv
+  exact RouteExecution.travel (Nat.le_refl _) serv
+
+-- Concrete trace to route execution, for the EXACT selected bits.
+-- The suffix premise is used only as the induction hypothesis.
+theorem route_extend_step (w : World) (r : RouteData) (fmt : RouteFormat w r)
+    (t pick held : Nat) {s v u : State} {a b m h : Nat}
+    (st : Step w s v a b) (tail : LegalTrace w v u m h)
+    (ok : RouteOK w r t (LegalTrace.cons st tail) pick held)
+    (cont : ∀ pk hd, RouteOK w r t tail pk hd →
+      RouteExecution r (w.capacity t) (truckVertex v t) pk hd
+        (routeCount r pk hd) (traceRouteCost w r t tail)) :
+    RouteExecution r (w.capacity t) (truckVertex s t) pick held
+      (routeCount r pick held) (traceRouteCost w r t (LegalTrace.cons st tail)) := by
+  cases st with
+  | drive z a b ht hr valid =>
+    exact route_extend_same w r t pick held _ tail ok (fun _ _ => rfl) cont
+  | board z f a ht hf hr room valid =>
+    exact route_extend_same w r t pick held _ tail ok (fun _ _ => rfl) cont
+  | disembark z f ht valid =>
+    exact route_extend_same w r t pick held _ tail ok (fun _ _ => rfl) cont
+  | sail f b hr hne valid =>
+    exact route_extend_same w r t pick held _ tail ok (fun _ _ => rfl) cont
+  | load p z a hp ht room valid =>
+    cases selected : pick.testBit p with
+    | true =>
+      have eq := route_pickup_carrier w r t p z a hp ht room valid tail (ok.pending p selected)
+      subst z
+      exact route_extend_pickup w r fmt t p a pick held hp ht room valid tail ok selected cont
+    | false =>
+      have notHeld : held.testBit p = false := by
+        cases hb : held.testBit p
+        · rfl
+        · have hh := (ok.held p hb).2.1
+          rw [hp] at hh
+          cases hh
+      apply route_extend_same w r t pick held _ tail ok _ cont
+      intro q hq
+      have ne : q ≠ p := by
+        intro e; subst q; simp [selected,notHeld] at hq
+      simp [setAt,ne]
+  | unload p z a hp ht valid =>
+    cases selected : held.testBit p with
+    | true =>
+      have he := (ok.held p selected).2.1
+      have eq : z = t := ParcelPosition.onTruck.inj (hp.symm.trans he)
+      subst z
+      exact route_extend_delivery w r fmt t p a pick held hp ht valid tail ok selected cont
+    | false =>
+      have notPending : pick.testBit p = false := by
+        cases hb : pick.testBit p
+        · rfl
+        · obtain ⟨_,x,hg,_,_,_,_⟩ := ok.pending p hb
+          rw [hp] at hg
+          cases hg
+      apply route_extend_same w r t pick held _ tail ok _ cont
+      intro q hq
+      have ne : q ≠ p := by
+        intro e; subst q; simp [selected,notPending] at hq
+      simp [setAt,ne]
+
+theorem trace_route_execution (w : World) (r : RouteData) (fmt : RouteFormat w r)
+    (t : Nat) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (done : Goal w u)
+    (pick held : Nat) (ok : RouteOK w r t tr pick held) :
+    RouteExecution r (w.capacity t) (truckVertex s t) pick held
+      (routeCount r pick held) (traceRouteCost w r t tr) := by
+  induction tr generalizing pick held with
+  | nil s =>
+    obtain ⟨rfl,rfl⟩ := route_goal_masks w r t s pick held done ok
+    have hz : routeCount r 0 0 = 0 := by simp [routeCount,sumN_zero]
+    rw [hz]
+    exact RouteExecution.done _
+  | @cons s v u a b m h st tail ih =>
+    exact route_extend_step w r fmt t pick held st tail ok
+      (fun pk hd valid => ih done pk hd valid)
+
+theorem route_actual_trace_bound (w : World) (r : RouteData) (fmt : RouteFormat w r)
+    (t : Nat) {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) (done : Goal w u)
+    (pick held : Nat) (ok : RouteOK w r t tr pick held) (top : Nat) :
+    routeRecurrence r (w.capacity t) top (2*r.parcels) (truckVertex s t) pick held ≤
+      traceRouteCost w r t tr :=
+  route_recurrence_le_actual r (w.capacity t) top
+    (trace_route_execution w r fmt t tr done pick held ok)
+    (2*r.parcels) (route_ok_count_le w r t ok)
+
+#print axioms route_extend_pickup
+#print axioms route_extend_delivery
+#print axioms route_extend_step
+#print axioms trace_route_execution
+#print axioms route_actual_trace_bound
+end IslandLogistics
