@@ -6643,8 +6643,6 @@ theorem trace_route_mask_bit (w : World)
     simpa [activeParcels] using hp
   cases hf : traceFlag w tr p with
   | true =>
-    change (traceRouteMask w tr).testBit i = !traceFlag w tr p
-    rw [hf]
     cases hb : (traceRouteMask w tr).testBit i
     · rfl
     · obtain ⟨t,ht,bit⟩ := (route_mask_union_bit _ _ i).mp hb
@@ -6662,11 +6660,10 @@ theorem trace_route_mask_bit (w : World)
     have hsel : traceSelector w tr t p = true := by
       simp [traceSelector,traceDigit,hf,car,hv.2]
     have bit : (routeAssignedMask w tr t).testBit i = true := by
-      simp [routeAssignedMask,localRouteMask,predMask_testBit,hi,← p,hsel]
+      simpa [routeAssignedMask,localRouteMask,predMask_testBit,hi,p] using hsel
     have hb : (traceRouteMask w tr).testBit i = true :=
       (route_mask_union_bit _ _ i).mpr ⟨t,List.mem_range.mpr ht,bit⟩
-    change (traceRouteMask w tr).testBit i = !traceFlag w tr p
-    simp [hb,hf]
+    exact hb
 
 theorem trace_route_mask_range (w : World) {s u : State} {m h : Nat}
     (tr : LegalTrace w s u m h) :
@@ -6705,6 +6702,19 @@ noncomputable def routeRows (w : World) (r : RouteData) (s : State) (top : Nat) 
     List (Nat → Nat) :=
   (List.range w.trucks).map (fun t => routeVectorEntry w r s top (activeParcels w s) t)
 
+theorem route_range_nodup (n : Nat) : (List.range n).Nodup := by
+  induction n with
+  | zero => simp
+  | succ n ih =>
+    rw [List.range_succ]
+    apply List.Nodup.append
+    · exact ih
+    · simp
+    · intro a ha hb
+      have e : a = n := by simpa using hb
+      have h := List.mem_range.mp ha
+      omega
+
 theorem trace_route_convolution_bound (w : World) (r : RouteData) (fmt : RouteFormat w r)
     (price : RouteTariff) (cert : RouteMetricCertificate w r price)
     {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {d x f : Nat}
@@ -6716,7 +6726,7 @@ theorem trace_route_convolution_bound (w : World) (r : RouteData) (fmt : RouteFo
       price.drive*d + price.service*x + price.sail*f := by
   have alloc := route_allocation_from_masks (routeAssignedMask w tr)
     (fun t => routeVectorEntry w r s top (activeParcels w s) t)
-    (List.range w.trucks) (by simp) (assigned_mask_disjoint w tr)
+    (List.range w.trucks) (route_range_nodup _) (assigned_mask_disjoint w tr)
   have hb := route_convolution_witness top alloc
   change routeConvolution top (routeRows w r s top) (traceRouteMask w tr) ≤ _ at hb
   have he : ((List.range w.trucks).map (fun t =>
