@@ -1860,3 +1860,214 @@ theorem legal_path_assignment_column (w : World) {s u : State} {m h e : Nat}
 #print axioms path_assignment_valid
 #print axioms legal_path_assignment_column
 end IslandLogistics
+
+
+namespace IslandLogistics
+/- Exact lexicographic bin-packing recurrence used in ex1.py:1293ff,
+   _bin and DirectCutAssignments.bins.
+   The subset is represented by its list of remaining item weights.
+   Each remove-one choice is the list analogue of clearing one set bit.
+   This proof concerns the actual recurrence, not a fractional surrogate. -/
+abbrev BinState := Nat × Nat
+
+def binLE (a b : BinState) : Prop :=
+  a.1 < b.1 ∨ (a.1 = b.1 ∧ a.2 ≤ b.2)
+
+theorem binLE_refl (a : BinState) : binLE a a := by
+  unfold binLE
+  omega
+
+theorem binLE_trans {a b c : BinState} (ab : binLE a b) (bc : binLE b c) :
+    binLE a c := by
+  unfold binLE at *
+  omega
+
+theorem binLE_count {a b : BinState} (h : binLE a b) : a.1 ≤ b.1 := by
+  unfold binLE at h
+  omega
+
+def binNext (C : Nat) (a : BinState) (w : Nat) : BinState :=
+  if a.1 ≠ 0 ∧ a.2 + w ≤ C then (a.1,a.2+w) else (a.1+1,w)
+
+theorem binNext_mono (C w : Nat) {a b : BinState} (ab : binLE a b) :
+    binLE (binNext C a w) (binNext C b w) := by
+  unfold binNext
+  split <;> split <;> unfold binLE at * <;> simp_all <;> omega
+
+theorem binNext_fresh (C w : Nat) (a : BinState) :
+    binLE (binNext C a w) (a.1+1,w) := by
+  unfold binNext
+  split <;> unfold binLE <;> simp <;> omega
+
+def binMin (a b : BinState) : BinState :=
+  if a.1 < b.1 ∨ (a.1 = b.1 ∧ a.2 ≤ b.2) then a else b
+
+theorem binMin_left (a b : BinState) : binLE (binMin a b) a := by
+  unfold binMin binLE
+  split <;> omega
+
+theorem binMin_right (a b : BinState) : binLE (binMin a b) b := by
+  unfold binMin binLE
+  split <;> omega
+
+def binFold (seed : BinState) : List BinState → BinState
+  | [] => seed
+  | a::as => binFold (binMin seed a) as
+
+theorem binFold_le_seed (seed : BinState) (xs : List BinState) :
+    binLE (binFold seed xs) seed := by
+  induction xs generalizing seed with
+  | nil => exact binLE_refl _
+  | cons a as ih => exact binLE_trans (ih _) (binMin_left _ _)
+
+theorem binFold_le_member (seed : BinState) (xs : List BinState) (x : BinState)
+    (h : x ∈ xs) : binLE (binFold seed xs) x := by
+  induction xs generalizing seed with
+  | nil => simp at h
+  | cons a as ih =>
+    rw [List.mem_cons] at h
+    rcases h with eq | rest
+    · subst x
+      exact binLE_trans (binFold_le_seed _ _) (binMin_right _ _)
+    · exact ih _ rest
+
+inductive RemoveWeight (w : Nat) : List Nat → List Nat → Prop where
+  | head (xs : List Nat) : RemoveWeight w (w::xs) xs
+  | tail {xs ys : List Nat} (v : Nat) :
+      RemoveWeight w xs ys → RemoveWeight w (v::xs) (v::ys)
+
+def lastChoices : List Nat → List (Nat × List Nat)
+  | [] => []
+  | w::xs => (w,xs) :: (lastChoices xs).map (fun (v,ys) => (v,w::ys))
+
+theorem removeWeight_choice {w : Nat} {xs ys : List Nat}
+    (h : RemoveWeight w xs ys) : (w,ys) ∈ lastChoices xs := by
+  induction h with
+  | head xs => simp [lastChoices]
+  | @tail xs ys v h ih =>
+    simp only [lastChoices,List.mem_cons]
+    right
+    exact List.mem_map.mpr ⟨(w,ys),ih,rfl⟩
+
+theorem removeWeight_length {w : Nat} {xs ys : List Nat}
+    (h : RemoveWeight w xs ys) : xs.length = ys.length+1 := by
+  induction h with
+  | head xs => simp
+  | tail v h ih => simp [ih]
+
+theorem removeWeight_last (xs : List Nat) (w : Nat) :
+    RemoveWeight w (xs++[w]) xs := by
+  induction xs with
+  | nil => exact RemoveWeight.head []
+  | cons x xs ih => exact RemoveWeight.tail x ih
+
+-- The seed matches the finite (P+1,0) sentinel of the Python code.
+-- It can be arbitrary for the witness inequality; no bound on h is built in.
+def binDP (C : Nat) (seed : BinState) : Nat → List Nat → BinState
+  | _, [] => (0,0)
+  | 0, _::_ => seed
+  | k+1, w::xs =>
+    binFold seed (((lastChoices (w::xs)).filter (fun x => x.1 ≤ C)).map
+      (fun x => binNext C (binDP C seed k x.2) x.1))
+
+-- A packing witness has any item order and may start a new bin even
+-- when the previous bin has remaining capacity. Reuse always respects
+-- capacity. Empty bins need not be represented.
+inductive BinWitness (C : Nat) : List Nat → BinState → Prop where
+  | empty : BinWitness C [] (0,0)
+  | fresh {xs ys : List Nat} {w : Nat} {st : BinState} :
+      RemoveWeight w xs ys → w ≤ C → BinWitness C ys st →
+      BinWitness C xs (st.1+1,w)
+  | reuse {xs ys : List Nat} {w : Nat} {st : BinState} :
+      RemoveWeight w xs ys → w ≤ C → st.1 ≠ 0 → st.2+w ≤ C →
+      BinWitness C ys st → BinWitness C xs (st.1,st.2+w)
+
+theorem binDP_le_next (C : Nat) (seed : BinState) (k : Nat)
+    {xs ys : List Nat} {w : Nat}
+    (rem : RemoveWeight w xs ys) (fit : w ≤ C) :
+    binLE (binDP C seed (k+1) xs) (binNext C (binDP C seed k ys) w) := by
+  have mem := removeWeight_choice rem
+  cases xs with
+  | nil => cases rem
+  | cons a as =>
+    unfold binDP
+    apply binFold_le_member
+    apply List.mem_map.mpr
+    refine ⟨(w,ys),?_,rfl⟩
+    simp [mem,fit]
+
+theorem binDP_le_witness (C : Nat) (seed : BinState)
+    {xs : List Nat} {st : BinState} (pw : BinWitness C xs st)
+    (fuel : Nat) (enough : xs.length ≤ fuel) :
+    binLE (binDP C seed fuel xs) st := by
+  induction pw generalizing fuel with
+  | empty => simp [binDP,binLE]
+  | @fresh xs ys w st rem fit rest ih =>
+    cases fuel with
+    | zero =>
+      have h := removeWeight_length rem
+      omega
+    | succ k =>
+      have h := removeWeight_length rem
+      have pref := ih k (by omega)
+      exact binLE_trans (binDP_le_next C seed k rem fit)
+        (binLE_trans (binNext_mono C w pref) (binNext_fresh C w st))
+  | @reuse xs ys w st rem fit nonzero room rest ih =>
+    cases fuel with
+    | zero =>
+      have h := removeWeight_length rem
+      omega
+    | succ k =>
+      have h := removeWeight_length rem
+      have pref := ih k (by omega)
+      have hn := binNext_mono C w pref
+      have he : binNext C st w = (st.1,st.2+w) := by
+        simp [binNext,nonzero,room]
+      rw [he] at hn
+      exact binLE_trans (binDP_le_next C seed k rem fit) hn
+
+theorem binDP_count_le_witness (C : Nat) (seed : BinState)
+    {xs : List Nat} {st : BinState} (pw : BinWitness C xs st) :
+    (binDP C seed xs.length xs).1 ≤ st.1 :=
+  binLE_count (binDP_le_witness C seed pw xs.length (by omega))
+
+-- The following construction converts each nonempty capacity-feasible
+-- cargo group into one bin. The list may be ordered by the actual
+-- crossing events; the recurrence permits any removal order.
+theorem binWitness_reuse_list (C : Nat)
+    (xs more : List Nat) (b l : Nat)
+    (h : BinWitness C xs (b,l)) (hb : b ≠ 0) (room : l+more.sum ≤ C) :
+    BinWitness C (xs++more) (b,l+more.sum) := by
+  induction more generalizing xs l with
+  | nil => simpa using h
+  | cons w ws ih =>
+    have hsum : (w::ws).sum = w+ws.sum := by simp
+    have hw : w ≤ C := by rw [hsum] at room; omega
+    have hl : l+w ≤ C := by rw [hsum] at room; omega
+    have next : BinWitness C (xs++[w]) (b,l+w) :=
+      BinWitness.reuse (removeWeight_last xs w) hw hb hl h
+    have hn := ih (xs++[w]) (l+w) next (by rw [hsum] at room; omega)
+    simpa [List.append_assoc,Nat.add_assoc,hsum] using hn
+
+theorem binWitness_add_group (C : Nat) (xs group : List Nat)
+    (st : BinState) (h : BinWitness C xs st)
+    (nonempty : group ≠ []) (fit : group.sum ≤ C) :
+    BinWitness C (xs++group) (st.1+1,group.sum) := by
+  cases group with
+  | nil => contradiction
+  | cons w ws =>
+    have hw : w ≤ C := by simp at fit; omega
+    have next : BinWitness C (xs++[w]) (st.1+1,w) :=
+      BinWitness.fresh (removeWeight_last xs w) hw h
+    have hn := binWitness_reuse_list C (xs++[w]) ws (st.1+1) w next (by omega)
+      (by simpa using fit)
+    simpa [List.append_assoc] using hn
+
+-- The exact recursive DP never returns more bins than any concrete
+-- packing witness, including distinct equal-weight parcels.
+#print axioms binNext_mono
+#print axioms removeWeight_choice
+#print axioms binDP_le_witness
+#print axioms binDP_count_le_witness
+#print axioms binWitness_add_group
+end IslandLogistics
