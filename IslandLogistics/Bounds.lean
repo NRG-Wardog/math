@@ -3676,3 +3676,155 @@ theorem actual_trace_direct_profile (w : World) (side : Nat → Bool)
 #print axioms trace_assignment_column
 #print axioms actual_trace_direct_profile
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Bit masks of ACTUAL terminal truck locations. This is the same
+-- encoding as the Python integer stock mask (one bit per labeled truck).
+def predMask : Nat → (Nat → Bool) → Nat
+  | 0, _ => 0
+  | n+1, pred => predMask n pred ||| (if pred n then 2^n else 0)
+
+theorem predMask_testBit (n : Nat) (pred : Nat → Bool) (i : Nat) :
+    (predMask n pred).testBit i = (decide (i<n) && pred i) := by
+  induction n with
+  | zero => simp [predMask]
+  | succ n ih =>
+    simp only [predMask,Nat.testBit_or,ih]
+    by_cases e : i = n
+    · subst i
+      cases hp : pred n <;> simp [hp,Nat.testBit_two_pow]
+    · have ne : n ≠ i := Ne.symm e
+      have hlt : (i < n+1) = (i < n) := propext (by omega)
+      cases hp : pred n <;> simp [hp,Nat.testBit_two_pow,ne,hlt]
+
+def finalMask (w : World) (s : State) (side : Nat → Bool) : Nat :=
+  predMask w.trucks (fun t => side (physicalTruck s t))
+
+def maskWithin (a b : Nat) : Prop :=
+  ∀ i, a.testBit i = true → b.testBit i = true
+
+theorem maskWithin_refl (a : Nat) : maskWithin a a := by
+  intro i h; exact h
+
+theorem maskWithin_trans {a b c : Nat} (ab : maskWithin a b) (bc : maskWithin b c) :
+    maskWithin a c := by intro i hi; exact bc i (ab i hi)
+
+theorem maskWithin_and {a b : Nat} (h : maskWithin a b) : a &&& b = a := by
+  apply Nat.eq_of_testBit_eq
+  intro i
+  rw [Nat.testBit_and]
+  cases he : a.testBit i
+  · simp
+  · simp [h i he]
+
+theorem finalMask_subset (w : World) (s : State) (left right : Nat → Bool)
+    (h : ∀ a, left a = true → right a = true) :
+    maskWithin (finalMask w s left) (finalMask w s right) := by
+  intro i hi
+  simp only [finalMask,predMask_testBit] at hi ⊢
+  have hh : i < w.trucks ∧ left (physicalTruck s i) = true := by simpa using hi
+  simp [hh.1,h _ hh.2]
+
+theorem finalMask_join_left (w : World) (s : State) (a b : Nat → Bool) :
+    maskWithin (finalMask w s a) (finalMask w s (fun x => a x || b x)) :=
+  finalMask_subset w s a _ (by intro x hx; simp [hx])
+
+theorem finalMask_join_right (w : World) (s : State) (a b : Nat → Bool) :
+    maskWithin (finalMask w s b) (finalMask w s (fun x => a x || b x)) :=
+  finalMask_subset w s b _ (by intro x hx; simp [hx])
+
+theorem finalMask_remove_disjoint (w : World) (s : State) (a b : Nat → Bool) (mask : Nat)
+    (ha : maskWithin (finalMask w s a) mask)
+    (disj : ∀ x, a x = true → b x = false) :
+    maskWithin (finalMask w s a) (mask ^^^ finalMask w s b) := by
+  intro i hi
+  have hm := ha i hi
+  have hbit : i < w.trucks ∧ a (physicalTruck s i) = true := by
+    simpa [finalMask,predMask_testBit] using hi
+  have hb : (finalMask w s b).testBit i = false := by
+    simp [finalMask,predMask_testBit,disj _ hbit.2]
+  simp [Nat.testBit_xor,hm,hb]
+
+inductive CutForest where
+  | empty
+  | branch : (Nat → Bool) → CutForest → CutForest
+  | join : CutForest → CutForest → CutForest
+
+def forestRegion : CutForest → Nat → Bool
+  | .empty => fun _ => false
+  | .branch side _ => side
+  | .join l r => fun a => forestRegion l a || forestRegion r a
+
+def forestCuts : CutForest → List (Nat → Bool)
+  | .empty => []
+  | .branch side child => side :: forestCuts child
+  | .join l r => forestCuts l ++ forestCuts r
+
+def ValidCutForest : CutForest → Prop
+  | .empty => True
+  | .branch side child => ValidCutForest child ∧
+      ∀ a, forestRegion child a = true → side a = true
+  | .join l r => ValidCutForest l ∧ ValidCutForest r ∧
+      ∀ a, forestRegion l a = true → forestRegion r a = false
+
+def forestDP (row : (Nat → Bool) → Nat → Nat) : CutForest → CutDP
+  | .empty => .leaf
+  | .branch side child => .relax (.addEdge (row side) (forestDP row child))
+  | .join l r => .split (forestDP row l) (forestDP row r)
+
+def actualForestCost (w : World) (u : State) (row : (Nat → Bool) → Nat → Nat)
+    (tree : CutForest) : Nat :=
+  ((forestCuts tree).map (fun side => row side (finalMask w u side))).sum
+
+-- The actual terminal truck locations simultaneously select witnesses
+-- for every nested cut and every sibling merge. Unused trucks can stay
+-- at an ancestor, exactly as allowed by the Python subset minimum.
+theorem forest_actual_witness (w : World) (u : State)
+    (row : (Nat → Bool) → Nat → Nat) (tree : CutForest)
+    (valid : ValidCutForest tree) (mask : Nat)
+    (inside : maskWithin (finalMask w u (forestRegion tree)) mask) :
+    CutWitness (forestDP row tree) mask (actualForestCost w u row tree) := by
+  induction tree generalizing mask with
+  | empty => exact CutWitness.leaf mask
+  | branch side child ih =>
+    let sub := finalMask w u side
+    have hsub : maskWithin sub mask := inside
+    have childInside := finalMask_subset w u (forestRegion child) side valid.2
+    have hw := ih valid.1 sub childInside
+    have hle : sub ≤ mask := Nat.le_of_testBit hsub
+    have hand := maskWithin_and hsub
+    exact CutWitness.relax hle hand (CutWitness.addEdge hw)
+  | join l r il ir =>
+    let sub := finalMask w u (forestRegion r)
+    have hright : maskWithin sub mask :=
+      maskWithin_trans (finalMask_join_right w u _ _) inside
+    have hleft : maskWithin (finalMask w u (forestRegion l)) mask :=
+      maskWithin_trans (finalMask_join_left w u _ _) inside
+    have lmask := finalMask_remove_disjoint w u (forestRegion l) (forestRegion r) mask hleft valid.2.2
+    have hl := il valid.1 (mask ^^^ sub) lmask
+    have hr := ir valid.2.1 sub (maskWithin_refl _)
+    have hle : sub ≤ mask := Nat.le_of_testBit hright
+    have hw := CutWitness.split hle (maskWithin_and hright) hl hr
+    simpa [forestDP,actualForestCost,forestCuts,List.map_append,natListSum_append] using hw
+
+theorem finalMask_full (w : World) (u : State) (side : Nat → Bool) :
+    maskWithin (finalMask w u side) (2^w.trucks-1) := by
+  intro i hi
+  rw [Nat.testBit_two_pow_sub_one]
+  have h : i < w.trucks ∧ side (physicalTruck u i) = true := by
+    simpa [finalMask,predMask_testBit] using hi
+  simp [h.1]
+
+theorem forest_dp_real_terminal_bound (w : World) (u : State)
+    (row : (Nat → Bool) → Nat → Nat) (tree : CutForest)
+    (valid : ValidCutForest tree) (top : Nat) :
+    evalCut top (forestDP row tree) (2^w.trucks-1) ≤ actualForestCost w u row tree :=
+  evalCut_le_witness top (forest_actual_witness w u row tree valid _
+    (finalMask_full w u (forestRegion tree)))
+
+#print axioms predMask_testBit
+#print axioms forest_actual_witness
+#print axioms forest_dp_real_terminal_bound
+end IslandLogistics
