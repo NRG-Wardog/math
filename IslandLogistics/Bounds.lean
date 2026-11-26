@@ -2968,11 +2968,11 @@ theorem step_road_cut_budget (w : World) (sys : RoadCutSystem w)
     omega
   | load p t a hp ht room valid =>
     rw [sum_map_eq_zero sys.cuts _ (fun side _ =>
-      flux_zero_of_same_side w side _ _ (fun _ _ => rfl))]
+      flux_zero_of_same_side w side s {s with parcel := setAt s.parcel p (.onTruck t)} (fun _ _ => rfl))]
     omega
   | unload p t a hp ht valid =>
     rw [sum_map_eq_zero sys.cuts _ (fun side _ =>
-      flux_zero_of_same_side w side _ _ (fun _ _ => rfl))]
+      flux_zero_of_same_side w side s {s with parcel := setAt s.parcel p (.ground a)} (fun _ _ => rfl))]
     omega
 
 -- Reified legal trace, so crossing counts for ALL cuts are measured
@@ -3018,7 +3018,7 @@ theorem sum_map_add_nat {α : Type} (xs : List α) (f g : α → Nat) :
 theorem sum_map_le {α : Type} (xs : List α) (f g : α → Nat)
     (h : ∀ x ∈ xs, f x ≤ g x) : (xs.map f).sum ≤ (xs.map g).sum := by
   induction xs with
-  | nil => rfl
+  | nil => simp
   | cons x xs ih =>
     have hx := h x (by simp)
     have hh := ih (fun y hy => h y (List.mem_cons_of_mem _ hy))
