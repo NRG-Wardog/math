@@ -5287,3 +5287,129 @@ theorem vtx_trace_flux_path (w : World) (side : Vertex → Bool)
 #print axioms vtx_flux_inward_bin_bound
 #print axioms vtx_path_flux_balance
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+def groundIslandSide (island : Nat → Nat) (i : Nat) : Vertex → Bool
+  | .ground a => island a == i
+  | .aboard _ _ => false
+
+-- At the ground-island cut, entering and leaving are precisely
+-- DISEMBARK and BOARD events, respectively. Cargo is counted even when
+-- initially aboard at its goal island.
+def islandBoardDemand (w : World) (island : Nat → Nat) (i : Nat)
+    (s : State) (C : Nat) (seed : BinState) : Nat :=
+  vtx_binInward w (fun v => !groundIslandSide island i v) s C seed
+
+def islandDisembarkDemand (w : World) (island : Nat → Nat) (i : Nat)
+    (s : State) (C : Nat) (seed : BinState) : Nat :=
+  vtx_binInward w (groundIslandSide island i) s C seed
+
+def islandBoardLower (w : World) (island : Nat → Nat) (i : Nat)
+    (s : State) (C : Nat) (seed : BinState) : Nat :=
+  max (islandBoardDemand w island i s C seed)
+    (islandDisembarkDemand w island i s C seed -
+      (w.trucks-vtx_cutStockCount w (groundIslandSide island i) s))
+
+def islandDisembarkLower (w : World) (island : Nat → Nat) (i : Nat)
+    (s : State) (C : Nat) (seed : BinState) : Nat :=
+  max (islandDisembarkDemand w island i s C seed)
+    (islandBoardDemand w island i s C seed -
+      vtx_cutStockCount w (groundIslandSide island i) s)
+
+theorem ground_island_demands_bound (w : World) (island : Nat → Nat) (i : Nat)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C) (seed : BinState) :
+    islandBoardLower w island i s C seed ≤ vtx_traceOut w (groundIslandSide island i) tr ∧
+    islandDisembarkLower w island i s C seed ≤ vtx_traceIn w (groundIslandSide island i) tr := by
+  let side := groundIslandSide island i
+  have path := vtx_trace_flux_path w side tr
+  have hi := vtx_flux_inward_bin_bound w side path done vl vp C cap seed
+  have ho := vtx_flux_inward_bin_bound w (fun v => !side v) (vtx_flux_complement w side path) done vl vp C cap seed
+  have hb := vtx_path_flux_balance w side path
+  have hs := vtx_cut_stock_le w side s
+  have hu := vtx_cut_stock_le w side u
+  change islandDisembarkDemand w island i s C seed ≤ _ at hi
+  change islandBoardDemand w island i s C seed ≤ _ at ho
+  change _ + vtx_cutStockCount w (groundIslandSide island i) s =
+    _ + vtx_cutStockCount w (groundIslandSide island i) u at hb
+  change vtx_cutStockCount w (groundIslandSide island i) s ≤ w.trucks at hs
+  change vtx_cutStockCount w (groundIslandSide island i) u ≤ w.trucks at hu
+  unfold islandBoardLower islandDisembarkLower
+  dsimp [side] at *
+  omega
+
+-- Count the actual change of ground-island occupancy for a single
+-- primitive. A road never leaves its road component.
+theorem ground_step_flux_label (w : World) (island : Nat → Nat)
+    (sameRoad : ∀ a b, w.road a b → island a = island b) (i : Nat)
+    {s u : State} {act : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u act m h) :
+    (vtx_enteringTrucks w (groundIslandSide island i) s u).length =
+      (match act with | .disembark _ f => flagCost (island (s.ferry f) == i) | _ => 0) ∧
+    (vtx_leavingTrucks w (groundIslandSide island i) s u).length =
+      (match act with | .board _ _ a => flagCost (island a == i) | _ => 0) := by
+  simp only [vtx_leavingTrucks,vtx_enteringTrucks,filtered_count_eq_sum]
+  cases st with
+  | drive t a b ht hr valid =>
+    have hs : ∀ q, q < w.trucks →
+        groundIslandSide island i (truckVertex s q) =
+          groundIslandSide island i (truckVertex {s with truck := setAt s.truck t (.land b)} q) := by
+      intro q hq
+      by_cases eq : q = t
+      · subst q; simp [truckVertex,ht,setAt,groundIslandSide,sameRoad a b hr]
+      · simp [truckVertex,setAt,eq]
+    constructor <;>
+      rw [sumN_congr _ (fun _ => 0) _ (by
+        intro q hq
+        rw [← hs q hq]
+        cases groundIslandSide island i (truckVertex s q) <;> rfl),sumN_zero]
+  | board t f a ht hf hr room valid =>
+    constructor
+    · rw [sumN_single _ _ t valid.1 (by
+        intro q hq ne
+        simp [truckVertex,setAt,ne]
+        cases groundIslandSide island i (truckVertex s q) <;> rfl)]
+      simp [truckVertex,ht,setAt,groundIslandSide]
+    · rw [sumN_single _ _ t valid.1 (by
+        intro q hq ne
+        simp [truckVertex,setAt,ne]
+        cases groundIslandSide island i (truckVertex s q) <;> rfl)]
+      simp [truckVertex,ht,setAt,groundIslandSide,flagCost]
+  | disembark t f ht valid =>
+    constructor
+    · rw [sumN_single _ _ t valid.1 (by
+        intro q hq ne
+        simp [truckVertex,setAt,ne]
+        cases groundIslandSide island i (truckVertex s q) <;> rfl)]
+      simp [truckVertex,ht,setAt,groundIslandSide,flagCost]
+    · rw [sumN_single _ _ t valid.1 (by
+        intro q hq ne
+        simp [truckVertex,setAt,ne]
+        cases groundIslandSide island i (truckVertex s q) <;> rfl)]
+      simp [truckVertex,ht,setAt,groundIslandSide]
+  | sail f b hr hne valid =>
+    have hs : ∀ q, q < w.trucks →
+        groundIslandSide island i (truckVertex s q) =
+          groundIslandSide island i (truckVertex {s with ferry := setAt s.ferry f b} q) := by
+      intro q hq
+      cases he : s.truck q <;> simp [truckVertex,he,groundIslandSide]
+    constructor <;>
+      rw [sumN_congr _ (fun _ => 0) _ (by
+        intro q hq
+        rw [← hs q hq]
+        cases groundIslandSide island i (truckVertex s q) <;> rfl),sumN_zero]
+  | load p t a hp ht room valid =>
+    constructor <;> rw [sumN_congr _ (fun _ => 0) _ (by
+      intro q hq
+      cases groundIslandSide island i (truckVertex s q) <;> rfl),sumN_zero]
+  | unload p t a hp ht valid =>
+    constructor <;> rw [sumN_congr _ (fun _ => 0) _ (by
+      intro q hq
+      cases groundIslandSide island i (truckVertex s q) <;> rfl),sumN_zero]
+
+#print axioms ground_island_demands_bound
+#print axioms ground_step_flux_label
+end IslandLogistics
