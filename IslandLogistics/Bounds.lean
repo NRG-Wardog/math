@@ -619,6 +619,7 @@ theorem residual_unchanged (w : World) (s u : State)
     (handleOne w u) w.parcels
     (fun q _ => residual_same w s u q (congrFun he q))
   rw [h]
+  exact Nat.le_refl _
 
 theorem residual_step (w : World) {s u : State} {m h : Nat}
     (st : Step w s u m h) :
@@ -645,7 +646,6 @@ theorem residual_step (w : World) {s u : State} {m h : Nat}
       apply residual_same
       simp [setAt, neq]
     · simp [handleOne, extraOne, hp, setAt]
-      split <;> omega
 
 -- The index e is the actual sum of non-goal unloading charges along the
 -- path, not an assumed bound on the true optimum.
