@@ -5415,3 +5415,65 @@ theorem ground_step_flux_label (w : World) (island : Nat → Nat)
 #print axioms ground_island_demands_bound
 #print axioms ground_step_flux_label
 end IslandLogistics
+
+
+namespace IslandLogistics
+noncomputable def directCompressedRoadBound (w : World) (s : State)
+    (caps : List Nat) (C : Nat) (seed : BinState) (forest : CompressedCutForest)
+    (top baseMove : Nat) : Nat :=
+  exactCutMin top ((assignmentColumns caps (selectedJobs w s (activeParcels w s))).map
+    (fun ds => omittedPenalty caps.length ds + max baseMove
+      (evalCut top (compressedDP (fun side mask =>
+        directMaskProfile w side s C (digitSelector (activeParcels w s) ds) seed mask) forest)
+        (2^w.trucks-1))))
+
+-- The compressed, unit-cost true-road coupled cut forest:
+-- assignment enumeration, transfer penalty, per-truck and aggregate
+-- capacity, visit requirements, terminal mask DP and movement budget
+-- are all derived from ONE actual legal completion.
+theorem direct_compressed_road_admissible (w : World) (sys : RoadCutSystem w)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h)
+    (done : Goal w u) (vl : ValidTruckLoad w s) (vp : ValidParcelCarriers w s)
+    (vf : ValidParcelFit w s) (vfer : ValidFerries w s) (vt : ValidTruckCarriers w s)
+    (caps : List Nat) (cl : caps.length = w.trucks)
+    (cv : ∀ t, t < w.trucks → caps.getD t 0 = w.capacity t)
+    (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (seed : BinState) (forest : CompressedCutForest) (valid : ∀ ds, ds ∈ assignmentColumns caps (selectedJobs w s (activeParcels w s)) →
+      ValidCompressedForest (fun side mask =>
+        directMaskProfile w side s C (digitSelector (activeParcels w s) ds) seed mask) forest)
+    (cuts : compressedCuts forest = sys.cuts) (top baseMove : Nat) (baseBound : baseMove ≤ m) :
+    handling w s + directCompressedRoadBound w s caps C seed forest top baseMove ≤ m+h := by
+  obtain ⟨tr⟩ := trace_from_path w path
+  let ds := traceDigits w tr
+  let sel := digitSelector (activeParcels w s) ds
+  let row := fun side mask => directMaskProfile w side s C sel seed mask
+  obtain ⟨mem,hpen⟩ := trace_assignment_column w tr done vp vf caps cl cv
+  have forestBound := compressed_full_mask_bound w u row forest (valid ds mem) top
+  have hcuts := trace_road_cut_budget w sys tr vfer vt
+  have hactual : compressedActualCost w u row forest ≤ m := by
+    unfold compressedActualCost
+    rw [cuts]
+    apply Nat.le_trans _ hcuts
+    apply sum_map_le
+    intro side hs
+    have hprofile := concrete_direct_profile_bound w side tr done vl vp C cap sel
+      (fun t ht p hp own => digitSelector_trace_owner w tr t ht p own) seed
+    change directMaskProfile w side s C sel seed (finalMask w u side) ≤
+      traceIn w side tr + traceOut w side tr
+    rw [directMaskProfile_actual]
+    omega
+  have hdp : evalCut top (compressedDP row forest) (2^w.trucks-1) ≤ m :=
+    Nat.le_trans forestBound hactual
+  have hm : directCompressedRoadBound w s caps C seed forest top baseMove ≤
+      omittedPenalty caps.length ds + max baseMove (evalCut top (compressedDP row forest) (2^w.trucks-1)) := by
+    unfold directCompressedRoadBound
+    apply exactCutMin_le_member
+    exact List.mem_map.mpr ⟨ds,mem,rfl⟩
+  have hmax : max baseMove (evalCut top (compressedDP row forest) (2^w.trucks-1)) ≤ m :=
+    Nat.max_le.mpr ⟨baseBound,hdp⟩
+  change handling w s + omittedPenalty caps.length ds ≤ h at hpen
+  omega
+
+
+#print axioms direct_compressed_road_admissible
+end IslandLogistics
