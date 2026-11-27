@@ -9657,7 +9657,7 @@ theorem port_ret_step {w : World} (r : PortRetractionSpec w) (base : State)
         have hx : r.loc b = (portRetState r base s).ferry f := by
           simp [portRetState,hs,he]
         rw [hx,setAt_current]
-        exact ⟨rfl,rfl⟩
+        exact ⟨rfl,True.intro⟩
       · right
         apply Step.sail (portRetState r base s) f (r.loc b)
         · exact r.route f b hv.1 hs hr
@@ -9668,7 +9668,7 @@ theorem port_ret_step {w : World} (r : PortRetractionSpec w) (base : State)
       have hx : base.ferry f = (portRetState r base s).ferry f := by
         simp [portRetState,hs]
       rw [hx,setAt_current]
-      exact ⟨rfl,rfl⟩
+      exact ⟨rfl,True.intro⟩
   | load p t a hp ht room hv =>
     right
     rw [port_ret_parcel_update]
