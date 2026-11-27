@@ -8058,7 +8058,7 @@ theorem sail_table_step (r : SailSpec w) (C : Nat) (seed : BinState)
         intro q hq hk
         by_cases h : q = p
         · subst q; simp [physicalParcel,physicalTruck,setAt,hp,ht]
-        · simp [physicalParcel,setAt,h])
+        · simp [physicalParcel,physicalTruck,setAt,h])
     rw [← he]; simp [sailCount]
   | unload p t a hp ht hv =>
     have he := sail_view_congr r (s := s) (u := {s with parcel := setAt s.parcel p (.ground a)})
@@ -8066,7 +8066,7 @@ theorem sail_table_step (r : SailSpec w) (C : Nat) (seed : BinState)
         intro q hq hk
         by_cases h : q = p
         · subst q; simp [physicalParcel,physicalTruck,setAt,hp,ht]
-        · simp [physicalParcel,setAt,h])
+        · simp [physicalParcel,physicalTruck,setAt,h])
     rw [← he]; simp [sailCount]
 
 theorem sailing_trace_budget (r : SailSpec w) (C : Nat) (seed : BinState)
@@ -8096,4 +8096,138 @@ theorem sailing_pattern_admissible (r : SailSpec w) (C : Nat) (seed : BinState)
 #print axioms sail_cargo_bins
 #print axioms sail_table_step
 #print axioms sailing_pattern_admissible
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- StockRidePattern's abstract cost-5 ride defers occupied sailings until
+-- disembarkation. A credit is held for one boarding and the first sail.
+-- This ledger does not yet prove the shadow-state projection or table
+-- construction; its statements are independent of any heuristic.
+inductive StockRidePhase where
+  | idle
+  | anchored
+  | traveled
+  deriving DecidableEq
+
+def stockRideCredit : StockRidePhase → Nat
+  | .idle => 0
+  | .anchored => 1
+  | .traveled => 4
+
+-- Indices: concrete ferry/service cost, abstract transition cost.
+inductive StockRideEvent : StockRidePhase → StockRidePhase → Nat → Nat → Prop where
+  | board : StockRideEvent .idle .anchored 1 0
+  | emptySail : StockRideEvent .idle .idle 3 3
+  | emptySailSame : StockRideEvent .idle .idle 3 0
+  | firstSail : StockRideEvent .anchored .traveled 3 0
+  | laterSail : StockRideEvent .traveled .traveled 3 0
+  | leaveUntraveled : StockRideEvent .anchored .idle 1 0
+  | leaveReturned : StockRideEvent .traveled .idle 1 0
+  | leaveChanged : StockRideEvent .traveled .idle 1 5
+
+theorem stock_event_credit {p q : StockRidePhase} {a b : Nat}
+    (st : StockRideEvent p q a b) :
+    b + stockRideCredit q ≤ a + stockRideCredit p := by
+  cases st <;> decide
+
+theorem stock_sum_replace_balance (f g : Nat → Nat) (p n : Nat)
+    (hp : p < n) (heq : ∀ q, q ≠ p → f q = g q) :
+    sumN f n + g p = sumN g n + f p := by
+  induction n with
+  | zero => omega
+  | succ n ih =>
+    by_cases e : n = p
+    · subst n
+      have he := sumN_congr f g p (fun q hq => heq q (by omega))
+      simp only [sumN]
+      omega
+    · have hh : p < n := by omega
+      have hi := ih hh
+      have eq := heq n e
+      simp only [sumN]
+      omega
+
+def stockFleetCredit (n : Nat) (s : Nat → StockRidePhase) : Nat :=
+  sumN (fun i => stockRideCredit (s i)) n
+
+-- One ferry changes per action. All other actions may stutter.
+def StockFleetEdge (n : Nat) (s t : Nat → StockRidePhase) (a b : Nat) : Prop :=
+  (∃ i q, i < n ∧ StockRideEvent (s i) q a b ∧ t = setAt s i q) ∨
+    (s = t ∧ b = 0)
+
+theorem stock_fleet_step_credit (n : Nat) {s t : Nat → StockRidePhase} {a b : Nat}
+    (st : StockFleetEdge n s t a b) :
+    b + stockFleetCredit n t ≤ a + stockFleetCredit n s := by
+  rcases st with ⟨i,q,hi,ev,rfl⟩ | ⟨rfl,rfl⟩
+  · have hb := stock_event_credit ev
+    have he := stock_sum_replace_balance
+      (fun j => stockRideCredit (s j))
+      (fun j => stockRideCredit (setAt s i q j)) i n hi
+      (by intro j hj; simp [setAt,hj])
+    change stockFleetCredit n s + stockRideCredit (setAt s i q i) =
+      stockFleetCredit n (setAt s i q) + stockRideCredit (s i) at he
+    have hq : stockRideCredit (setAt s i q i) = stockRideCredit q := by
+      simp [setAt]
+    rw [hq] at he
+    omega
+  · omega
+
+theorem stock_fleet_trace_credit (n : Nat) {s t : Nat → StockRidePhase}
+    {a b : Nat} (p : Path (StockFleetEdge n) s t a b) :
+    b + stockFleetCredit n t ≤ a + stockFleetCredit n s := by
+  induction p with
+  | nil s => simp
+  | cons st rest ih =>
+    have hs := stock_fleet_step_credit n st
+    omega
+
+-- At the queried state, an already occupied ferry is anchored at its
+-- CURRENT port, not a historical departure port: initial credit is 1.
+def stockInitialPhase (aboard : Nat → Bool) (i : Nat) : StockRidePhase :=
+  if aboard i then .anchored else .idle
+
+def stockInitialCredit (n : Nat) (aboard : Nat → Bool) : Nat :=
+  sumN (fun i => if aboard i then 1 else 0) n
+
+theorem stock_initial_credit_eq (n : Nat) (aboard : Nat → Bool) :
+    stockFleetCredit n (stockInitialPhase aboard) = stockInitialCredit n aboard := by
+  unfold stockFleetCredit stockInitialCredit
+  apply sumN_congr
+  intro i hi
+  cases h : aboard i <;> simp [stockInitialPhase,stockRideCredit,h]
+
+-- No terminal emptiness assumption: leftover credits are nonnegative.
+-- Subtracting the exact initial credit is sound for any certified
+-- abstract lower bound on the constructed ride trace.
+theorem stock_fleet_corrected_bound (n : Nat) (aboard : Nat → Bool)
+    {t : Nat → StockRidePhase} {a b table : Nat}
+    (p : Path (StockFleetEdge n) (stockInitialPhase aboard) t a b)
+    (lower : table ≤ b) :
+    table - stockInitialCredit n aboard ≤ a := by
+  have hb := stock_fleet_trace_credit n p
+  rw [stock_initial_credit_eq n aboard] at hb
+  omega
+
+-- SailingPattern is a sail-count bound. Road and handling terms may
+-- be combined only against the SAME concrete path's disjoint budgets.
+theorem sailing_partition_completion (w : World) (r : SailSpec w)
+    (C : Nat) (seed : BinState) (tab : SailTable w r C seed)
+    (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h}
+    {d x f roadBound handleBound : Nat}
+    (counts : TraceCounts w tr d x f) (v : CarrierInvariant w s)
+    (done : Goal w u) (rd : roadBound ≤ d) (hh : handleBound ≤ h) :
+    handleBound + roadBound + 3 * tab.value (sailView r s) ≤ m+h := by
+  have hs := sailing_pattern_admissible r C seed tab cap counts v done
+  have hm := trace_count_movement w counts
+  omega
+
+#print axioms stock_event_credit
+#print axioms stock_fleet_step_credit
+#print axioms stock_fleet_trace_credit
+#print axioms stock_fleet_corrected_bound
+#print axioms sailing_partition_completion
+
 end IslandLogistics
