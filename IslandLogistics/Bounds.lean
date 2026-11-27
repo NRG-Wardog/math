@@ -9095,3 +9095,422 @@ theorem stock_ride_road_partition (r : RideSpec w) (C : Nat) (tab : RideTable w 
 #print axioms stock_ride_road_partition
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Constructor primitives used by Pattern and StockRidePattern.
+-- At k=1 this is exactly the Python base case; k=0 is its natural
+-- mathematical extension, useful for proofs.
+def weakComps : Nat → Nat → List (List Nat)
+  | 0, n => if n = 0 then [[]] else []
+  | k+1, n => (List.range (n+1)).flatMap (fun a =>
+      (weakComps k (n-a)).map (fun rest => a :: rest))
+
+theorem weak_comps_complete (xs : List Nat) : xs ∈ weakComps xs.length xs.sum := by
+  induction xs with
+  | nil => simp [weakComps]
+  | cons a rest ih =>
+    simp only [List.length_cons,List.sum_cons,weakComps]
+    apply List.mem_flatMap.mpr
+    refine ⟨a,List.mem_range.mpr (by omega),?_⟩
+    apply List.mem_map.mpr
+    refine ⟨rest,?_,rfl⟩
+    have he : a+rest.sum-a = rest.sum := by omega
+    simpa [he] using ih
+
+theorem weak_comps_sound (k n : Nat) (xs : List Nat)
+    (h : xs ∈ weakComps k n) : xs.length = k ∧ xs.sum = n := by
+  induction k generalizing n xs with
+  | zero =>
+    by_cases he : n = 0
+    · simp [weakComps,he] at h
+      subst xs
+      simp [he]
+    · simp [weakComps,he] at h
+  | succ k ih =>
+    simp only [weakComps] at h
+    obtain ⟨a,ha,hm⟩ := List.mem_flatMap.mp h
+    obtain ⟨rest,hr,he⟩ := List.mem_map.mp hm
+    subst xs
+    have hb := List.mem_range.mp ha
+    have hi := ih (n-a) rest hr
+    simp only [List.length_cons,List.sum_cons]
+    omega
+
+inductive MixedDigits : List Nat → List Nat → Prop where
+  | nil : MixedDigits [] []
+  | cons {r d : Nat} {rs ds : List Nat} :
+      d < r → MixedDigits rs ds → MixedDigits (r::rs) (d::ds)
+
+def mixedEncode : List Nat → List Nat → Nat
+  | r::rs, d::ds => d + r*mixedEncode rs ds
+  | _, _ => 0
+
+def mixedDecode : List Nat → Nat → List Nat
+  | [], _ => []
+  | r::rs, z => z%r :: mixedDecode rs (z/r)
+
+theorem mixed_decode_encode {rs ds : List Nat} (h : MixedDigits rs ds) :
+    mixedDecode rs (mixedEncode rs ds) = ds := by
+  induction h with
+  | nil => rfl
+  | @cons r d rs ds hd valid ih =>
+    simp only [mixedEncode,mixedDecode]
+    rw [radix_head _ _ _ hd,radix_tail _ _ _ hd,ih]
+
+theorem mixed_encode_injective {rs a b : List Nat}
+    (ha : MixedDigits rs a) (hb : MixedDigits rs b)
+    (eq : mixedEncode rs a = mixedEncode rs b) : a = b := by
+  have he := congrArg (mixedDecode rs) eq
+  rw [mixed_decode_encode ha,mixed_decode_encode hb] at he
+  exact he
+
+theorem mixed_encode_bound {rs ds : List Nat} (h : MixedDigits rs ds) :
+    mixedEncode rs ds < rs.prod := by
+  induction h with
+  | nil => simp [mixedEncode]
+  | @cons r d rs ds hd valid ih =>
+    have hm := Nat.mul_le_mul_left r (show mixedEncode rs ds+1 ≤ rs.prod by omega)
+    rw [Nat.mul_add,Nat.mul_one] at hm
+    simp only [mixedEncode,List.prod_cons]
+    omega
+
+def histogramAt (pos : Nat → Nat) (k a : Nat) : Nat :=
+  sumN (fun i => if pos i = a then 1 else 0) k
+
+def histogramVector (pos : Nat → Nat) (k n : Nat) : List Nat :=
+  (List.range n).map (histogramAt pos k)
+
+theorem histogram_sum (pos : Nat → Nat) (k n : Nat)
+    (valid : ∀ i, i < k → pos i < n) :
+    sumN (histogramAt pos k) n = k := by
+  unfold histogramAt
+  rw [sumN_swap]
+  have h := sumN_congr
+    (fun i => sumN (fun a => if pos i = a then 1 else 0) n)
+    (fun _ => 1) k (by
+      intro i hi
+      have he := sumN_single (fun a => if pos i = a then 1 else 0) n (pos i)
+        (valid i hi) (by intro q hq hn; simp [Ne.symm hn])
+      simpa using he)
+  rw [h]
+  induction k with
+  | zero => rfl
+  | succ k ih => simp [sumN,ih]
+
+theorem histogram_composition (pos : Nat → Nat) (k n : Nat)
+    (valid : ∀ i, i < k → pos i < n) :
+    histogramVector pos k n ∈ weakComps n k := by
+  have hlen : (histogramVector pos k n).length = n := by simp [histogramVector]
+  have hsum : (histogramVector pos k n).sum = k := by
+    unfold histogramVector
+    rw [sum_range_eq_sumN,histogram_sum pos k n valid]
+  have h := weak_comps_complete (histogramVector pos k n)
+  rw [hlen,hsum] at h
+  exact h
+
+def selectedCount (sel : Nat → Bool) (k : Nat) : Nat :=
+  sumN (fun i => if sel i then 1 else 0) k
+
+def movePositions (pos : Nat → Nat) (sel : Nat → Bool) (b : Nat) : Nat → Nat :=
+  fun i => if sel i then b else pos i
+
+-- Exact arithmetic for the reversible count-vector translations in
+-- Pattern, SailingPattern and StockRidePattern. Selection cannot remove
+-- more entries from an origin than the origin actually contains.
+theorem histogram_selected_le (pos : Nat → Nat) (sel : Nat → Bool) (k a : Nat)
+    (origin : ∀ i, i < k → sel i = true → pos i = a) :
+    selectedCount sel k ≤ histogramAt pos k a := by
+  unfold selectedCount histogramAt
+  apply sumN_mono
+  intro i hi
+  cases hs : sel i
+  · simp [hs]
+  · simp [hs,origin i hi hs]
+
+theorem histogram_shift_balance (pos : Nat → Nat) (sel : Nat → Bool)
+    (k a b z : Nat) (origin : ∀ i, i < k → sel i = true → pos i = a) :
+    histogramAt (movePositions pos sel b) k z +
+      (if z = a then selectedCount sel k else 0) =
+    histogramAt pos k z + (if z = b then selectedCount sel k else 0) := by
+  induction k with
+  | zero => simp [histogramAt,selectedCount,sumN]
+  | succ k ih =>
+    have prev := ih (fun i hi hs => origin i (by omega) hs)
+    simp only [histogramAt,selectedCount,sumN] at prev ⊢
+    cases hs : sel k with
+    | false =>
+      by_cases ha : z = a <;> by_cases hb : z = b <;>
+        simp [movePositions,hs,ha,hb] at prev ⊢ <;> omega
+    | true =>
+      have hp := origin k (by omega) hs
+      by_cases ha : z = a <;> by_cases hb : z = b <;>
+        simp [movePositions,hs,hp,ha,hb,eq_comm] at prev ⊢ <;> omega
+
+theorem histogram_shift_exact (pos : Nat → Nat) (sel : Nat → Bool)
+    (k a b z : Nat) (origin : ∀ i, i < k → sel i = true → pos i = a) :
+    histogramAt (movePositions pos sel b) k z =
+      histogramAt pos k z - (if z = a then selectedCount sel k else 0) +
+        (if z = b then selectedCount sel k else 0) := by
+  have he := histogram_shift_balance pos sel k a b z origin
+  have hb := histogram_selected_le pos sel k a origin
+  by_cases ha : z = a
+  · subst z
+    omega
+  · simp [ha] at he ⊢
+    omega
+
+#print axioms weak_comps_complete
+#print axioms weak_comps_sound
+#print axioms mixed_decode_encode
+#print axioms mixed_encode_injective
+#print axioms mixed_encode_bound
+#print axioms histogram_composition
+#print axioms histogram_shift_exact
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Temporal extraction from a concrete trace, with no assumptions about
+-- search order or pruning. Used to justify causal leaf-zone visits.
+def causalTraceLength {s u : State} {m h : Nat} :
+    LegalTrace w s u m h → Nat
+  | .nil _ => 0
+  | .cons _ tail => causalTraceLength tail + 1
+
+def causalTraceState {s u : State} {m h : Nat} :
+    LegalTrace w s u m h → Nat → State
+  | .nil s, _ => s
+  | @LegalTrace.cons _ s _ _ _ _ _ _ _ _, 0 => s
+  | .cons _ tail, i+1 => causalTraceState tail i
+
+theorem causal_trace_zero {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) :
+    causalTraceState tr 0 = s := by
+  cases tr <;> rfl
+
+theorem causal_trace_end {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) :
+    causalTraceState tr (causalTraceLength tr) = u := by
+  induction tr with
+  | nil s => rfl
+  | cons st tail ih => simpa [causalTraceLength,causalTraceState] using ih
+
+theorem causal_trace_step {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (i : Nat) (hi : i < causalTraceLength tr) :
+    ∃ a b, Step w (causalTraceState tr i) (causalTraceState tr (i+1)) a b := by
+  induction tr generalizing i with
+  | nil s => simp [causalTraceLength] at hi
+  | @cons s t u a b m h st tail ih =>
+    cases i with
+    | zero =>
+      exact ⟨a,b,by simpa [causalTraceState,causal_trace_zero] using st⟩
+    | succ i =>
+      have hb : i < causalTraceLength tail := by
+        simp [causalTraceLength] at hi
+        omega
+      exact ih i hb
+
+theorem causal_trace_valid {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (v : CarrierInvariant w s) (i : Nat) : CarrierInvariant w (causalTraceState tr i) := by
+  induction tr generalizing i with
+  | nil s => exact v
+  | @cons s t u a b m h st tail ih =>
+    cases i with
+    | zero => exact v
+    | succ i => exact ih (step_carrier_invariant w st v) i
+
+theorem bool_enter_time (atTime : Nat → Bool) (n : Nat)
+    (start : atTime 0 = false) (finish : atTime n = true) :
+    ∃ i, i < n ∧ atTime i = false ∧ atTime (i+1) = true := by
+  induction n with
+  | zero => simp [start] at finish
+  | succ n ih =>
+    cases h : atTime n with
+    | false => exact ⟨n,by omega,h,finish⟩
+    | true =>
+      obtain ⟨i,hi,ha,hb⟩ := ih h
+      exact ⟨i,by omega,ha,hb⟩
+
+def causalEntryAt (w : World) (side : Nat → Bool) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (i : Nat) : Nat :=
+  (enteringTrucks w side (causalTraceState tr i) (causalTraceState tr (i+1))).length
+
+theorem causal_entry_le (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (i : Nat) (hi : i < causalTraceLength tr) :
+    causalEntryAt w side tr i ≤ traceIn w side tr := by
+  induction tr generalizing i with
+  | nil s => simp [causalTraceLength] at hi
+  | @cons s t u a b m h st tail ih =>
+    cases i with
+    | zero =>
+      simp [causalEntryAt,causalTraceState,causal_trace_zero,traceIn]
+    | succ i =>
+      have hb : i < causalTraceLength tail := by
+        simp [causalTraceLength] at hi
+        omega
+      have h := ih i hb
+      change causalEntryAt w side tail i ≤
+        (enteringTrucks w side s t).length + traceIn w side tail
+      omega
+
+theorem causal_two_entries (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (i j : Nat) (order : i < j) (hj : j < causalTraceLength tr)
+    (ha : 0 < causalEntryAt w side tr i) (hb : 0 < causalEntryAt w side tr j) :
+    2 ≤ traceIn w side tr := by
+  induction tr generalizing i j with
+  | nil s => simp [causalTraceLength] at hj
+  | @cons s t u a b m h st tail ih =>
+    cases j with
+    | zero => omega
+    | succ j =>
+      have hj' : j < causalTraceLength tail := by
+        simp [causalTraceLength] at hj
+        omega
+      change 0 < causalEntryAt w side tail j at hb
+      cases i with
+      | zero =>
+        have ha' : 0 < (enteringTrucks w side s t).length := by
+          simpa [causalEntryAt,causalTraceState,causal_trace_zero] using ha
+        have hb' := causal_entry_le w side tail j hj'
+        simp only [traceIn]
+        omega
+      | succ i =>
+        change 0 < causalEntryAt w side tail i at ha
+        have h := ih i j (by omega) hj' ha hb
+        simp only [traceIn]
+        omega
+
+theorem causal_unique_entry_time (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (one : traceIn w side tr ≤ 1) (i j : Nat)
+    (hi : i < causalTraceLength tr) (hj : j < causalTraceLength tr)
+    (ha : 0 < causalEntryAt w side tr i) (hb : 0 < causalEntryAt w side tr j) :
+    i = j := by
+  by_cases he : i = j
+  · exact he
+  · rcases Nat.lt_or_gt_of_ne he with h | h
+    · have h2 := causal_two_entries w side tr i j h hj ha hb
+      omega
+    · have h2 := causal_two_entries w side tr j i h hi hb ha
+      omega
+
+theorem causal_entry_positive (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (i t : Nat) (ht : t < w.trucks)
+    (before : side (physicalTruck (causalTraceState tr i) t) = false)
+    (after : side (physicalTruck (causalTraceState tr (i+1)) t) = true) :
+    0 < causalEntryAt w side tr i := by
+  have hm : t ∈ enteringTrucks w side (causalTraceState tr i)
+      (causalTraceState tr (i+1)) := by
+    simp [enteringTrucks,ht,before,after]
+  unfold causalEntryAt
+  cases he : enteringTrucks w side (causalTraceState tr i) (causalTraceState tr (i+1)) with
+  | nil => simp [he] at hm
+  | cons x xs => simp
+
+-- For any two disjoint work cuts A,B with no truck initially in A,
+-- a parcel going from A to B witnesses a truck entry into A strictly
+-- before a truck entry into B. This extracts the ordering from all six
+-- actual Step constructors, including arbitrary transshipment.
+theorem causal_demand_order (w : World) (A B : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (v : CarrierInvariant w s) (p : Nat) (hp : p < w.parcels)
+    (noTruck : ∀ t, t < w.trucks → A (physicalTruck s t) = false)
+    (disj : ∀ x, A x = true → B x = false)
+    (source : A (physicalParcel s p) = true)
+    (target : B (physicalParcel u p) = true) :
+    ∃ i j, i < j ∧ j < causalTraceLength tr ∧
+      0 < causalEntryAt w A tr i ∧ 0 < causalEntryAt w B tr j := by
+  let PA := fun i => A (physicalParcel (causalTraceState tr i) p)
+  let PB := fun i => B (physicalParcel (causalTraceState tr i) p)
+  have hb0 : PB 0 = false := by
+    simpa [PB,causal_trace_zero] using disj _ source
+  have hbn : PB (causalTraceLength tr) = true := by
+    simpa [PB,causal_trace_end] using target
+  obtain ⟨j,hj,hbo,hbi⟩ := bool_enter_time PB (causalTraceLength tr) hb0 hbn
+  have ha0 : (!PA 0) = false := by simp [PA,causal_trace_zero,source]
+  have hax : PA (j+1) = false := by
+    cases he : PA (j+1) with
+    | false => rfl
+    | true =>
+      have hd := disj (physicalParcel (causalTraceState tr (j+1)) p) he
+      change B (physicalParcel (causalTraceState tr (j+1)) p) = true at hbi
+      rw [hbi] at hd
+      contradiction
+  obtain ⟨k,hk,hko,hki⟩ := bool_enter_time (fun i => !PA i) (j+1) ha0 (by simp [hax])
+  have hka : A (physicalParcel (causalTraceState tr k) p) = true := by
+    change (!A (physicalParcel (causalTraceState tr k) p)) = false at hko
+    simpa using hko
+  have hkb : A (physicalParcel (causalTraceState tr (k+1)) p) = false := by
+    change (!A (physicalParcel (causalTraceState tr (k+1)) p)) = true at hki
+    simpa using hki
+  obtain ⟨a,b,step⟩ := causal_trace_step tr k (by omega)
+  have vk := causal_trace_valid tr v k
+  obtain ⟨t,ht,hpt,_⟩ := parcel_side_change_carrier w A step vk.parcels p hp
+    (by rw [hka,hkb]; decide)
+  have hat : A (physicalTruck (causalTraceState tr k) t) = true := by
+    simpa [physicalParcel,hpt] using hka
+  have haInit : A (physicalTruck (causalTraceState tr 0) t) = false := by
+    simpa [causal_trace_zero] using noTruck t ht
+  obtain ⟨i,hi,hio,hii⟩ := bool_enter_time
+    (fun i => A (physicalTruck (causalTraceState tr i) t)) k haInit hat
+  have haEntry := causal_entry_positive w A tr i t ht hio hii
+  obtain ⟨c,d,bstep⟩ := causal_trace_step tr j hj
+  have vj := causal_trace_valid tr v j
+  have hbo' : B (physicalParcel (causalTraceState tr j) p) = false := hbo
+  have hbi' : B (physicalParcel (causalTraceState tr (j+1)) p) = true := hbi
+  have he := (entering_parcel_owner w B bstep vj.parcels p hp hbo' hbi').1
+  have hbEntry : 0 < causalEntryAt w B tr j := by
+    unfold causalEntryAt
+    cases h : enteringTrucks w B (causalTraceState tr j) (causalTraceState tr (j+1)) with
+    | nil => simp [h] at he
+    | cons x xs => simp
+  exact ⟨i,j,by omega,hj,haEntry,hbEntry⟩
+
+theorem causal_single_entry_order (w : World) (A B : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (v : CarrierInvariant w s) (p : Nat) (hp : p < w.parcels)
+    (noTruck : ∀ t, t < w.trucks → A (physicalTruck s t) = false)
+    (disj : ∀ x, A x = true → B x = false)
+    (source : A (physicalParcel s p) = true) (target : B (physicalParcel u p) = true)
+    (oneA : traceIn w A tr ≤ 1) (oneB : traceIn w B tr ≤ 1)
+    (i j : Nat) (hi : i < causalTraceLength tr) (hj : j < causalTraceLength tr)
+    (ha : 0 < causalEntryAt w A tr i) (hb : 0 < causalEntryAt w B tr j) : i < j := by
+  obtain ⟨a,b,hab,hbtime,hentryA,hentryB⟩ :=
+    causal_demand_order w A B tr v p hp noTruck disj source target
+  have haeq := causal_unique_entry_time w A tr oneA i a hi (by omega) ha hentryA
+  have hbeq := causal_unique_entry_time w B tr oneB j b hj hbtime hb hentryB
+  omega
+
+-- A strictly increasing entry-time ranking rules out every nonempty
+-- directed demand cycle. Removing all multi-entry zones yields a DAG.
+inductive DemandWalk (edge : Nat → Nat → Prop) : Nat → Nat → Nat → Prop where
+  | nil (a : Nat) : DemandWalk edge a a 0
+  | cons {a b c k : Nat} : edge a b → DemandWalk edge b c k → DemandWalk edge a c (k+1)
+
+theorem demand_walk_rank (edge : Nat → Nat → Prop) (rank : Nat → Nat)
+    (monotone : ∀ a b, edge a b → rank a < rank b)
+    {a b k : Nat} (walk : DemandWalk edge a b k) : rank a+k ≤ rank b := by
+  induction walk with
+  | nil a => simp
+  | cons he rest ih =>
+    have h := monotone _ _ he
+    omega
+
+theorem demand_rank_no_cycle (edge : Nat → Nat → Prop) (rank : Nat → Nat)
+    (monotone : ∀ a b, edge a b → rank a < rank b)
+    {a k : Nat} (walk : DemandWalk edge a a k) : k = 0 := by
+  have h := demand_walk_rank edge rank monotone walk
+  omega
+
+#print axioms causal_trace_step
+#print axioms causal_unique_entry_time
+#print axioms causal_demand_order
+#print axioms causal_single_entry_order
+#print axioms demand_rank_no_cycle
+
+end IslandLogistics
