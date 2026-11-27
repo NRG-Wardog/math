@@ -8231,3 +8231,144 @@ theorem sailing_partition_completion (w : World) (r : SailSpec w)
 #print axioms sailing_partition_completion
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- A batch models the directed writes of a vectorized relaxation:
+-- every proposal uses the batch's immutable snapshot, and the destination
+-- label is reduced by min. The exact NumPy/index refinement is separate.
+structure BellmanArc where
+  src : Nat
+  dst : Nat
+  cost : Nat
+
+def bellmanUpdate (snap d : Nat → Nat) (e : BellmanArc) : Nat → Nat :=
+  setAt d e.src (min (d e.src) (e.cost + snap e.dst))
+
+theorem bellman_update_mono (snap d : Nat → Nat) (e : BellmanArc) (i : Nat) :
+    bellmanUpdate snap d e i ≤ d i := by
+  by_cases he : i = e.src
+  · subst i
+    simpa [bellmanUpdate,setAt] using
+      Nat.min_le_left (d e.src) (e.cost + snap e.dst)
+  · simp [bellmanUpdate,setAt,he]
+
+theorem bellman_update_proposal (snap d : Nat → Nat) (e : BellmanArc) :
+    bellmanUpdate snap d e e.src ≤ e.cost + snap e.dst := by
+  simpa [bellmanUpdate,setAt] using
+    Nat.min_le_right (d e.src) (e.cost + snap e.dst)
+
+def bellmanBatch (snap : Nat → Nat) :
+    List BellmanArc → (Nat → Nat) → (Nat → Nat)
+  | [], d => d
+  | e :: es, d => bellmanBatch snap es (bellmanUpdate snap d e)
+
+theorem bellman_batch_mono (snap d : Nat → Nat) (edges : List BellmanArc) (i : Nat) :
+    bellmanBatch snap edges d i ≤ d i := by
+  induction edges generalizing d with
+  | nil => exact Nat.le_refl _
+  | cons e es ih =>
+    change bellmanBatch snap es (bellmanUpdate snap d e) i ≤ d i
+    exact Nat.le_trans (ih _) (bellman_update_mono snap d e i)
+
+theorem bellman_batch_relaxes (snap d : Nat → Nat) (edges : List BellmanArc) :
+    ∀ e, e ∈ edges → bellmanBatch snap edges d e.src ≤ e.cost + snap e.dst := by
+  induction edges generalizing d with
+  | nil => intro e h; simp at h
+  | cons a es ih =>
+    intro e h
+    rcases List.mem_cons.mp h with he | hm
+    · subst e
+      change bellmanBatch snap es (bellmanUpdate snap d a) a.src ≤ a.cost + snap a.dst
+      exact Nat.le_trans (bellman_batch_mono snap _ es _)
+        (bellman_update_proposal snap d a)
+    · exact ih (bellmanUpdate snap d a) e hm
+
+def bellmanSweep : List (List BellmanArc) → (Nat → Nat) → (Nat → Nat)
+  | [], d => d
+  | batch :: rest, d => bellmanSweep rest (bellmanBatch d batch d)
+
+theorem bellman_sweep_mono (batches : List (List BellmanArc)) (d : Nat → Nat) (i : Nat) :
+    bellmanSweep batches d i ≤ d i := by
+  induction batches generalizing d with
+  | nil => exact Nat.le_refl _
+  | cons batch rest ih =>
+    change bellmanSweep rest (bellmanBatch d batch d) i ≤ d i
+    exact Nat.le_trans (ih _) (bellman_batch_mono d d batch i)
+
+-- No shortest-path exactness or convergence assumption. If one full
+-- monotone sweep is unchanged, each intermediate batch is unchanged.
+theorem bellman_fixed_sweep_certificate (batches : List (List BellmanArc))
+    (d : Nat → Nat) (fixed : bellmanSweep batches d = d) :
+    ∀ batch, batch ∈ batches → ∀ e, e ∈ batch → d e.src ≤ e.cost + d e.dst := by
+  induction batches generalizing d with
+  | nil => intro batch hb; simp at hb
+  | cons batch rest ih =>
+    change bellmanSweep rest (bellmanBatch d batch d) = d at fixed
+    have same : bellmanBatch d batch d = d := by
+      funext i
+      have hlow := bellman_sweep_mono rest (bellmanBatch d batch d) i
+      rw [fixed] at hlow
+      exact Nat.le_antisymm (bellman_batch_mono d d batch i) hlow
+    have tailFixed := fixed
+    rw [same] at tailFixed
+    intro b hb e he
+    rcases List.mem_cons.mp hb with eq | hm
+    · subst b
+      have h := bellman_batch_relaxes d d batch e he
+      rw [same] at h
+      exact h
+    · exact ih d tailFixed b hm e he
+
+theorem bellman_sweep_preserves_zero (batches : List (List BellmanArc))
+    (d : Nat → Nat) (goal : Nat) (hz : d goal = 0) :
+    bellmanSweep batches d goal = 0 := by
+  have h := bellman_sweep_mono batches d goal
+  omega
+
+def BellmanBatchEdge (batches : List (List BellmanArc))
+    (s t a _b : Nat) : Prop :=
+  ∃ batch, batch ∈ batches ∧ (⟨s,t,a⟩ : BellmanArc) ∈ batch
+
+-- A finite ceiling, including a label still equal to 60000, is sound
+-- whenever the table passed the certificate and the goal label is zero.
+theorem bellman_fixed_path_bound (batches : List (List BellmanArc))
+    (d : Nat → Nat) (fixed : bellmanSweep batches d = d)
+    {s t m h : Nat} (p : Path (BellmanBatchEdge batches) s t m h)
+    (goal : d t = 0) : d s ≤ m := by
+  have hstep : ∀ s t a b, BellmanBatchEdge batches s t a b → d s ≤ a + d t := by
+    intro s t a b edge
+    obtain ⟨batch,hb,he⟩ := edge
+    exact bellman_fixed_sweep_certificate batches d fixed batch hb _ he
+  have hp := potential_bound d hstep p
+  omega
+
+-- The uint16 arithmetic range used by Pattern, SailingPattern and
+-- StockRidePattern: no wraparound when the bounded inputs are added.
+theorem bellman_uint16_proposal_safe (label cost : Nat)
+    (hl : label ≤ 60000) (hc : cost ≤ 5) : label + cost < 65536 := by
+  omega
+
+-- Pointwise selection and maximum of already certified complete estimates
+-- require no consistency assumption and may depend on the queried state.
+theorem admissible_pointwise_le (w : World) (init : State) (h k : State → Nat)
+    (hk : AdmissibleOnReachable w init k) (le : ∀ s, h s ≤ k s) :
+    AdmissibleOnReachable w init h := by
+  intro s reach u m a path goal
+  exact Nat.le_trans (le s) (hk s reach u m a path goal)
+
+theorem admissible_max_complete (w : World) (init : State) (h k : State → Nat)
+    (hh : AdmissibleOnReachable w init h) (hk : AdmissibleOnReachable w init k) :
+    AdmissibleOnReachable w init (fun s => max (h s) (k s)) := by
+  intro s reach u m a path goal
+  exact max_bound _ _ _ (hh s reach u m a path goal) (hk s reach u m a path goal)
+
+#print axioms bellman_fixed_sweep_certificate
+#print axioms bellman_sweep_preserves_zero
+#print axioms bellman_fixed_path_bound
+#print axioms bellman_uint16_proposal_safe
+#print axioms admissible_pointwise_le
+#print axioms admissible_max_complete
+
+end IslandLogistics
