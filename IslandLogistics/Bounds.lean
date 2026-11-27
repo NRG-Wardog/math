@@ -9724,3 +9724,274 @@ theorem port_ret_preserves_optimal_witness {w : World} (r : PortRetractionSpec w
 #print axioms port_ret_preserves_optimal_witness
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- A finite minimum, without an oracle or a finite sentinel.
+theorem closure_nat_min (P : Nat → Prop) (n : Nat) (hn : P n) :
+    ∃ k, P k ∧ ∀ j, P j → k ≤ j := by
+  classical
+  induction n using Nat.strongRecOn with
+  | ind n ih =>
+    by_cases h : ∃ j, j < n ∧ P j
+    · obtain ⟨j,hj,hp⟩ := h
+      exact ih j hj hp
+    · exact ⟨n,hn,fun j hj => by
+        by_cases he : j < n
+        · exact False.elim (h ⟨j,he,hj⟩)
+        · omega⟩
+
+def closureFullMask (m : Nat) : Nat := 2^m-1
+
+theorem closure_full_bit (m i : Nat) :
+    (closureFullMask m).testBit i = decide (i<m) := by
+  unfold closureFullMask
+  rw [Nat.testBit_two_pow_sub_one]
+
+theorem closure_mask_nonzero (mask : Nat) (hn : mask ≠ 0) :
+    ∃ i, mask.testBit i = true := by
+  classical
+  by_cases he : ∃ i, mask.testBit i = true
+  · exact he
+  · apply False.elim
+    apply hn
+    apply Nat.eq_of_testBit_eq
+    intro i
+    cases hb : mask.testBit i
+    · simp [hb]
+    · exact False.elim (he ⟨i,hb⟩)
+
+theorem closure_remove_bit (mask i : Nat) (hi : mask.testBit i = true) :
+    maskWithin (mask ^^^ 2^i) mask ∧ mask ^^^ 2^i < mask := by
+  have sub : maskWithin (mask ^^^ 2^i) mask := by
+    intro j hj
+    by_cases he : j = i
+    · subst j; simp [Nat.testBit_xor,Nat.testBit_two_pow,hi] at hj
+    · simpa [Nat.testBit_xor,Nat.testBit_two_pow,Ne.symm he] using hj
+  have le := Nat.le_of_testBit sub
+  have neq : mask ^^^ 2^i ≠ mask := by
+    intro he
+    have h := congrArg (fun n : Nat => n.testBit i) he
+    simp [Nat.testBit_xor,Nat.testBit_two_pow,hi] at h
+  exact ⟨sub,by omega⟩
+
+theorem closure_add_bit (mask i : Nat) (hi : mask.testBit i = false) :
+    maskWithin mask (mask ||| 2^i) ∧ mask < mask ||| 2^i := by
+  have sub : maskWithin mask (mask ||| 2^i) := by
+    intro j hj
+    simp [Nat.testBit_or,hj]
+  have le := Nat.le_of_testBit sub
+  have neq : mask ≠ mask ||| 2^i := by
+    intro he
+    have h := congrArg (fun n : Nat => n.testBit i) he
+    simp [Nat.testBit_or,Nat.testBit_two_pow,hi] at h
+  exact ⟨sub,by omega⟩
+
+-- This is the Boolean recurrence in causal_choices: the empty graph is
+-- acyclic, and a nonempty mask can be peeled at a vertex with no incoming
+-- demand from that mask. Its evaluation order is justified by remove_bit.
+def FeedbackRecurrence (edge : Nat → Nat → Prop) (m : Nat)
+    (ok : Nat → Bool) : Prop :=
+  ok 0 = true ∧ ∀ mask, maskWithin mask (closureFullMask m) →
+    mask ≠ 0 → (ok mask = true ↔
+      ∃ i, mask.testBit i = true ∧
+        (∀ j, mask.testBit j = true → ¬ edge j i) ∧
+        ok (mask ^^^ 2^i) = true)
+
+theorem feedback_rank_accepted (edge : Nat → Nat → Prop) (m : Nat)
+    (ok : Nat → Bool) (recurrence : FeedbackRecurrence edge m ok)
+    (mask : Nat) (valid : maskWithin mask (closureFullMask m))
+    (rank : Nat → Nat)
+    (ranked : ∀ a b, mask.testBit a = true → mask.testBit b = true →
+      edge a b → rank a < rank b) : ok mask = true := by
+  classical
+  induction mask using Nat.strongRecOn with
+  | ind mask ih =>
+    by_cases he : mask = 0
+    · simpa [he] using recurrence.1
+    · obtain ⟨v,hv⟩ := closure_mask_nonzero mask he
+      obtain ⟨r,⟨i,hi,hr⟩,hmin⟩ :=
+        closure_nat_min (fun r => ∃ i, mask.testBit i = true ∧ rank i = r)
+          (rank v) ⟨v,hv,rfl⟩
+      have source : ∀ j, mask.testBit j = true → ¬ edge j i := by
+        intro j hj hedge
+        have h1 := ranked j i hj hi hedge
+        have h2 := hmin (rank j) ⟨j,hj,rfl⟩
+        omega
+      obtain ⟨sub,lt⟩ := closure_remove_bit mask i hi
+      have accepted := ih _ lt (maskWithin_trans sub valid)
+        (fun a b ha hb e => ranked a b (sub a ha) (sub b hb) e)
+      exact (recurrence.2 mask valid he).mpr ⟨i,hi,source,accepted⟩
+
+-- If there is a ranked (single-entry) set, extend it to a maximal
+-- accepted kept mask. The complement is one of Python's inclusion-
+-- minimal feedback masks. All removed bits were already outside the
+-- actual single-entry set; hence every forced repeated entry is real.
+theorem feedback_maximal_kept (m : Nat) (ok : Nat → Bool) (single : Nat)
+    (valid : maskWithin single (closureFullMask m)) (accepted : ok single = true) :
+    ∃ kept, maskWithin single kept ∧ maskWithin kept (closureFullMask m) ∧
+      ok kept = true ∧
+      ∀ i, i < m → kept.testBit i = false → ok (kept ||| 2^i) ≠ true := by
+  classical
+  let full := closureFullMask m
+  let P := fun n => ∃ k, maskWithin single k ∧ maskWithin k full ∧
+    ok k = true ∧ n = full-k
+  obtain ⟨n,⟨kept,sub,bounded,hok,hn⟩,hmin⟩ :=
+    closure_nat_min P (full-single) ⟨single,maskWithin_refl _,valid,accepted,rfl⟩
+  refine ⟨kept,sub,bounded,hok,?_⟩
+  intro i hi hbit hnew
+  obtain ⟨hin,hlt⟩ := closure_add_bit kept i hbit
+  have hb : maskWithin (kept ||| 2^i) full := by
+    intro j hj
+    by_cases he : j = i
+    · subst j
+      simp [full,closure_full_bit,hi]
+    · have hj' : kept.testBit j = true := by
+        simpa [Nat.testBit_or,Nat.testBit_two_pow,Ne.symm he] using hj
+      exact bounded j hj'
+  have hle := Nat.le_of_testBit hb
+  have hm := hmin (full-(kept ||| 2^i))
+    ⟨kept ||| 2^i,maskWithin_trans sub hin,hb,hnew,rfl⟩
+  omega
+
+-- For each non-repeated zone pick any one of its cuts with one entry.
+-- The chronological witness then proves the rank condition for the
+-- actual dependency graph even when different zones pick different cuts.
+theorem causal_feedback_from_trace (w : World)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (v : CarrierInvariant w s) (zones single : Nat) (edge : Nat → Nat → Prop)
+    (ok : Nat → Bool) (recurrence : FeedbackRecurrence edge zones ok)
+    (valid : maskWithin single (closureFullMask zones))
+    (side : Nat → Nat → Bool) (entry : Nat → Nat)
+    (noTruck : ∀ a, single.testBit a = true → ∀ t, t < w.trucks →
+      side a (physicalTruck s t) = false)
+    (one : ∀ a, single.testBit a = true → traceIn w (side a) tr ≤ 1)
+    (event : ∀ a, single.testBit a = true →
+      entry a < causalTraceLength tr ∧ 0 < causalEntryAt w (side a) tr (entry a))
+    (disj : ∀ a b, single.testBit a = true → single.testBit b = true → edge a b →
+      ∀ x, side a x = true → side b x = false)
+    (job : ∀ a b, single.testBit a = true → single.testBit b = true → edge a b →
+      ∃ p, p < w.parcels ∧ side a (physicalParcel s p) = true ∧
+        side b (physicalParcel u p) = true) :
+    ∃ kept, maskWithin single kept ∧ maskWithin kept (closureFullMask zones) ∧
+      ok kept = true ∧
+      ∀ i, i < zones → kept.testBit i = false → ok (kept ||| 2^i) ≠ true := by
+  have ranked : ∀ a b, single.testBit a = true → single.testBit b = true →
+      edge a b → entry a < entry b := by
+    intro a b ha hb he
+    obtain ⟨p,hp,hsrc,hdst⟩ := job a b ha hb he
+    exact causal_single_entry_order w (side a) (side b) tr v p hp
+      (noTruck a ha) (disj a b ha hb he) hsrc hdst (one a ha) (one b hb)
+      (entry a) (entry b) (event a ha).1 (event b hb).1 (event a ha).2 (event b hb).2
+  exact feedback_maximal_kept zones ok single valid
+    (feedback_rank_accepted edge zones ok recurrence single valid entry ranked)
+
+-- Cache proof: a key only needs to preserve the value, not the entire
+-- state. A hit, a miss, eviction and replacement preserve correctness.
+def KeyFactors {S K V : Type} (key : S → K) (eval : S → V) : Prop :=
+  ∀ s t, key s = key t → eval s = eval t
+
+def KeyCacheOK {S K V : Type} (key : S → K) (eval : S → V)
+    (cache : K → Option V) : Prop :=
+  ∀ s v, cache (key s) = some v → v = eval s
+
+def keyCacheGet {S K V : Type} (key : S → K) (eval : S → V)
+    (cache : K → Option V) (s : S) : V :=
+  (cache (key s)).getD (eval s)
+
+theorem key_cache_get {S K V : Type} (key : S → K) (eval : S → V)
+    (cache : K → Option V) (ok : KeyCacheOK key eval cache) (s : S) :
+    keyCacheGet key eval cache s = eval s := by
+  unfold keyCacheGet
+  cases h : cache (key s)
+  · rfl
+  · exact ok s _ h
+
+theorem key_cache_insert {S K V : Type} [DecidableEq K] (key : S → K) (eval : S → V)
+    (cache : K → Option V) (ok : KeyCacheOK key eval cache)
+    (factors : KeyFactors key eval) (s : S) :
+    KeyCacheOK key eval (fun k => if k = key s then some (eval s) else cache k) := by
+  intro t v hv
+  by_cases he : key t = key s
+  · simp [he] at hv
+    exact hv.symm.trans (factors t s he).symm
+  · simp [he] at hv
+    exact ok t v hv
+
+theorem key_cache_evict {S K V : Type} (key : S → K) (eval : S → V)
+    (cache : K → Option V) (ok : KeyCacheOK key eval cache) (keep : K → Bool) :
+    KeyCacheOK key eval (fun k => if keep k then cache k else none) := by
+  intro s v hv
+  cases he : keep (key s)
+  · simp [he] at hv
+  · exact ok s v (by simpa [he] using hv)
+
+theorem key_factors_projection {S K V : Type} (key : S → K) (f : K → V) :
+    KeyFactors key (fun s => f (key s)) := by
+  intro s t he
+  rw [he]
+
+-- The distinction between an admissible evaluator and safe pruning:
+-- d is the true remaining cost on the solvable quotient.  Each expanded
+-- non-goal must generate some optimal child. If an equal key was already
+-- expanded at a smaller g, the invariant covers that child as closed.
+-- This theorem deliberately does not assume consistency of h.
+theorem astar_frontier_witness {S : Type}
+    (d : S → Nat) (isGoal : S → Prop)
+    (openNode closedNode : S → Nat → Prop)
+    (closedNotGoal : ∀ s g, closedNode s g → ¬ isGoal s)
+    (zeroGoal : ∀ s, d s = 0 → isGoal s)
+    (expand : ∀ s g, closedNode s g → ¬ isGoal s →
+      ∃ t c g', 0 < c ∧ d s = c+d t ∧ g' ≤ g+c ∧
+        (openNode t g' ∨ closedNode t g'))
+    (s : S) (g : Nat) (covered : openNode s g ∨ closedNode s g) :
+    ∃ t k, openNode t k ∧ k+d t ≤ g+d s := by
+  have aux : ∀ rem s g, d s = rem → (openNode s g ∨ closedNode s g) →
+      ∃ t k, openNode t k ∧ k+d t ≤ g+rem := by
+    intro rem
+    induction rem using Nat.strongRecOn with
+    | ind rem ih =>
+      intro s g hrem hc
+      rcases hc with ho | hclosed
+      · exact ⟨s,g,ho,by omega⟩
+      · have hn := closedNotGoal s g hclosed
+        have hp : 0 < d s := by
+          by_cases he : d s = 0
+          · exact False.elim (hn (zeroGoal s he))
+          · omega
+        obtain ⟨t,c,k,hc,he,hk,ht⟩ := expand s g hclosed hn
+        have hlt : d t < rem := by omega
+        obtain ⟨u,l,hu,hl⟩ := ih (d t) hlt t k rfl ht
+        exact ⟨u,l,hu,by omega⟩
+  exact aux (d s) s g rfl covered
+
+theorem astar_goal_pop_optimal {S : Type}
+    (d h : S → Nat) (isGoal : S → Prop)
+    (openNode closedNode : S → Nat → Prop)
+    (closedNotGoal : ∀ s g, closedNode s g → ¬ isGoal s)
+    (zeroGoal : ∀ s, d s = 0 → isGoal s)
+    (expand : ∀ s g, closedNode s g → ¬ isGoal s →
+      ∃ t c g', 0 < c ∧ d s = c+d t ∧ g' ≤ g+c ∧
+        (openNode t g' ∨ closedNode t g'))
+    (initial popped : S) (cost : Nat)
+    (covered : openNode initial 0 ∨ closedNode initial 0)
+    (admissible : ∀ s g, openNode s g → h s ≤ d s)
+    (priorityMin : ∀ s g, openNode s g → cost+h popped ≤ g+h s)
+    (lower : d initial ≤ cost) : cost = d initial := by
+  obtain ⟨t,k,ho,ht⟩ := astar_frontier_witness d isGoal openNode closedNode
+    closedNotGoal zeroGoal expand initial 0 covered
+  have hb := admissible t k ho
+  have hp := priorityMin t k ho
+  omega
+
+#print axioms feedback_rank_accepted
+#print axioms feedback_maximal_kept
+#print axioms causal_feedback_from_trace
+#print axioms key_cache_get
+#print axioms key_cache_insert
+#print axioms key_cache_evict
+#print axioms astar_frontier_witness
+#print axioms astar_goal_pop_optimal
+
+end IslandLogistics
