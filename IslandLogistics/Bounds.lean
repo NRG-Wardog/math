@@ -9166,14 +9166,18 @@ theorem mixed_encode_injective {rs a b : List Nat}
   rw [mixed_decode_encode ha,mixed_decode_encode hb] at he
   exact he
 
+def mixedRadixProduct : List Nat → Nat
+  | [] => 1
+  | r::rs => r*mixedRadixProduct rs
+
 theorem mixed_encode_bound {rs ds : List Nat} (h : MixedDigits rs ds) :
-    mixedEncode rs ds < rs.prod := by
+    mixedEncode rs ds < mixedRadixProduct rs := by
   induction h with
-  | nil => simp [mixedEncode]
+  | nil => simp [mixedEncode,mixedRadixProduct]
   | @cons r d rs ds hd valid ih =>
-    have hm := Nat.mul_le_mul_left r (show mixedEncode rs ds+1 ≤ rs.prod by omega)
+    have hm := Nat.mul_le_mul_left r (show mixedEncode rs ds+1 ≤ mixedRadixProduct rs by omega)
     rw [Nat.mul_add,Nat.mul_one] at hm
-    simp only [mixedEncode,List.prod_cons]
+    simp only [mixedEncode,mixedRadixProduct]
     omega
 
 def histogramAt (pos : Nat → Nat) (k a : Nat) : Nat :=
@@ -9195,6 +9199,7 @@ theorem histogram_sum (pos : Nat → Nat) (k n : Nat)
         (valid i hi) (by intro q hq hn; simp [Ne.symm hn])
       simpa using he)
   rw [h]
+  clear h valid
   induction k with
   | zero => rfl
   | succ k ih => simp [sumN,ih]
@@ -9245,8 +9250,11 @@ theorem histogram_shift_balance (pos : Nat → Nat) (sel : Nat → Bool)
         simp [movePositions,hs,ha,hb] at prev ⊢ <;> omega
     | true =>
       have hp := origin k (by omega) hs
+      have ha' : (a = z) ↔ (z = a) := eq_comm
+      have hb' : (b = z) ↔ (z = b) := eq_comm
+      simp only [movePositions,hs,if_true,hp,ha',hb']
       by_cases ha : z = a <;> by_cases hb : z = b <;>
-        simp [movePositions,hs,hp,ha,hb,eq_comm] at prev ⊢ <;> omega
+        simp [ha,hb] at prev ⊢ <;> omega
 
 theorem histogram_shift_exact (pos : Nat → Nat) (sel : Nat → Bool)
     (k a b z : Nat) (origin : ∀ i, i < k → sel i = true → pos i = a) :
@@ -9257,6 +9265,7 @@ theorem histogram_shift_exact (pos : Nat → Nat) (sel : Nat → Bool)
   have hb := histogram_selected_le pos sel k a origin
   by_cases ha : z = a
   · subst z
+    simp only [if_pos rfl] at he ⊢
     omega
   · simp [ha] at he ⊢
     omega
