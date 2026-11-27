@@ -10634,3 +10634,258 @@ theorem hub_arc_bin_from_real_trace (w : World) (g : HubGraphCertificate w)
 #print axioms hub_arc_bin_from_real_trace
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Class-preserving label permutations, in the current bounded World/Step
+-- semantics (not the historical proof model).
+structure IndexRename (n : Nat) where
+  old : Nat → Nat
+  new : Nat → Nat
+  old_new : ∀ i, old (new i) = i
+  new_old : ∀ i, new (old i) = i
+  old_perm : ((List.range n).map old).Perm (List.range n)
+
+theorem ir_new_eq {n : Nat} (r : IndexRename n) (i j : Nat) :
+    r.new i = j ↔ i = r.old j := by
+  constructor
+  · intro h
+    have hh := congrArg r.old h
+    simpa only [r.old_new] using hh
+  · intro h
+    rw [h,r.new_old]
+
+theorem ir_old_eq {n : Nat} (r : IndexRename n) (i j : Nat) :
+    r.old i = j ↔ i = r.new j := by
+  constructor
+  · intro h
+    have hh := congrArg r.new h
+    simpa only [r.new_old] using hh
+  · intro h
+    rw [h,r.old_new]
+
+def IndexRename.inverse {n : Nat} (r : IndexRename n) : IndexRename n where
+  old := r.new
+  new := r.old
+  old_new := r.new_old
+  new_old := r.old_new
+  old_perm := by
+    have hh := r.old_perm.map r.new
+    rw [List.map_map] at hh
+    have he : r.new ∘ r.old = id := by
+      funext i
+      exact r.new_old i
+    rw [he,List.map_id] at hh
+    exact hh.symm
+
+theorem ir_old_bound {n : Nat} (r : IndexRename n) {i : Nat} (hi : i < n) :
+    r.old i < n := by
+  apply List.mem_range.mp
+  exact r.old_perm.mem_iff.mp (List.mem_map.mpr ⟨i,List.mem_range.mpr hi,rfl⟩)
+
+theorem ir_new_bound {n : Nat} (r : IndexRename n) {i : Nat} (hi : i < n) :
+    r.new i < n := ir_old_bound r.inverse hi
+
+theorem ir_setAt {n : Nat} (r : IndexRename n) {α β : Type}
+    (fn : α → β) (s : Nat → α) (k : Nat) (v : α) :
+    (fun i => fn (setAt s k v (r.old i))) =
+      setAt (fun i => fn (s (r.old i))) (r.new k) (fn v) := by
+  funext i
+  simp only [setAt,ir_old_eq]
+  split <;> rfl
+
+theorem ir_perm_sum {xs ys : List Nat} (h : xs.Perm ys) : xs.sum = ys.sum := by
+  induction h with
+  | nil => rfl
+  | cons x h ih => simp [ih]
+  | swap x y l => simp [Nat.add_comm,Nat.add_left_comm]
+  | trans h₁ h₂ i₁ i₂ => exact i₁.trans i₂
+
+theorem ir_sum {n : Nat} (r : IndexRename n) (fn : Nat → Nat) :
+    sumN (fun i => fn (r.old i)) n = sumN fn n := by
+  have hh := ir_perm_sum (r.old_perm.map fn)
+  rw [List.map_map] at hh
+  simpa [sum_range_eq_sumN,Function.comp_def] using hh
+
+structure WorldRename (w : World) where
+  tr : IndexRename w.trucks
+  fe : IndexRename w.ferries
+  pa : IndexRename w.parcels
+  capacity : ∀ i, w.capacity i = w.capacity (tr.old i)
+  weight : ∀ i, w.weight i = w.weight (pa.old i)
+  destination : ∀ i, w.goal i = w.goal (pa.old i)
+  slots : ∀ i, w.slots i = w.slots (fe.old i)
+  serves : ∀ i a, w.route i a ↔ w.route (fe.old i) a
+
+def wrTruck (r : WorldRename w) : TruckPosition → TruckPosition
+  | .land a => .land a
+  | .onFerry f => .onFerry (r.fe.new f)
+
+def wrParcel (r : WorldRename w) : ParcelPosition → ParcelPosition
+  | .ground a => .ground a
+  | .onTruck t => .onTruck (r.tr.new t)
+
+def wrState (r : WorldRename w) (s : State) : State :=
+  ⟨fun t => wrTruck r (s.truck (r.tr.old t)),
+   fun f => s.ferry (r.fe.old f),
+   fun p => wrParcel r (s.parcel (r.pa.old p))⟩
+
+theorem wr_carrier (r : WorldRename w) (v : ParcelPosition) (t : Nat) :
+    wrParcel r v = .onTruck t ↔ v = .onTruck (r.tr.old t) := by
+  cases v <;> simp [wrParcel,ir_new_eq]
+
+theorem wr_passenger (r : WorldRename w) (v : TruckPosition) (f : Nat) :
+    wrTruck r v = .onFerry f ↔ v = .onFerry (r.fe.old f) := by
+  cases v <;> simp [wrTruck,ir_new_eq]
+
+theorem wr_load (r : WorldRename w) (s : State) (t : Nat) :
+    load w (wrState r s) t = load w s (r.tr.old t) := by
+  unfold load
+  let fn := fun p => if s.parcel p = .onTruck (r.tr.old t) then w.weight p else 0
+  change sumN (fun p => if wrParcel r (s.parcel (r.pa.old p)) = .onTruck t
+    then w.weight p else 0) w.parcels = sumN fn w.parcels
+  simp only [wr_carrier]
+  have hf : (fun p => if s.parcel (r.pa.old p) = .onTruck (r.tr.old t)
+    then w.weight p else 0) = (fun p => fn (r.pa.old p)) := by
+    funext p
+    dsimp [fn]
+    rw [r.weight p]
+  rw [hf]
+  exact ir_sum r.pa fn
+
+theorem wr_occupancy (r : WorldRename w) (s : State) (f : Nat) :
+    occupancy w (wrState r s) f = occupancy w s (r.fe.old f) := by
+  unfold occupancy
+  let fn := fun t => if s.truck t = .onFerry (r.fe.old f) then 1 else 0
+  change sumN (fun t => if wrTruck r (s.truck (r.tr.old t)) = .onFerry f then 1 else 0)
+    w.trucks = sumN fn w.trucks
+  simp only [wr_passenger]
+  exact ir_sum r.tr fn
+
+theorem wr_truck_update (r : WorldRename w) (s : State) (t : Nat) (v : TruckPosition) :
+    wrState r {s with truck := setAt s.truck t v} =
+      {wrState r s with truck := setAt (wrState r s).truck (r.tr.new t) (wrTruck r v)} := by
+  simp only [wrState,ir_setAt]
+
+theorem wr_parcel_update (r : WorldRename w) (s : State) (p : Nat) (v : ParcelPosition) :
+    wrState r {s with parcel := setAt s.parcel p v} =
+      {wrState r s with parcel := setAt (wrState r s).parcel (r.pa.new p) (wrParcel r v)} := by
+  simp only [wrState,ir_setAt]
+
+theorem wr_ferry_update (r : WorldRename w) (s : State) (f a : Nat) :
+    wrState r {s with ferry := setAt s.ferry f a} =
+      {wrState r s with ferry := setAt (wrState r s).ferry (r.fe.new f) a} := by
+  have hh := ir_setAt r.fe (fun x : Nat => x) s.ferry f a
+  simp only [wrState]
+  exact congrArg (fun z => State.mk (fun t => wrTruck r (s.truck (r.tr.old t))) z
+    (fun p => wrParcel r (s.parcel (r.pa.old p)))) hh
+
+theorem wr_step (r : WorldRename w) {s u : State} {m h : Nat} (st : Step w s u m h) :
+    Step w (wrState r s) (wrState r u) m h := by
+  cases st with
+  | drive t a b ht hr hv =>
+    rw [wr_truck_update]
+    exact Step.drive _ (r.tr.new t) a b
+      (by simp [wrState,wrTruck,r.tr.old_new,ht]) hr
+      ⟨ir_new_bound r.tr hv.1,hv.2⟩
+  | board t f a ht hf hr room hv =>
+    rw [wr_truck_update]
+    exact Step.board _ (r.tr.new t) (r.fe.new f) a
+      (by simp [wrState,wrTruck,r.tr.old_new,ht])
+      (by simp [wrState,r.fe.old_new,hf])
+      ((r.serves _ _).mpr (by simpa only [r.fe.old_new] using hr))
+      (by rw [wr_occupancy,r.slots,r.fe.old_new]; exact room)
+      ⟨ir_new_bound r.tr hv.1,ir_new_bound r.fe hv.2.1,hv.2.2⟩
+  | disembark t f ht hv =>
+    rw [wr_truck_update]
+    have hh := Step.disembark (w := w) (wrState r s) (r.tr.new t) (r.fe.new f)
+      (by simp [wrState,wrTruck,r.tr.old_new,ht])
+      ⟨ir_new_bound r.tr hv.1,ir_new_bound r.fe hv.2⟩
+    simpa [wrTruck,wrState,r.fe.old_new] using hh
+  | sail f b hr hn hv =>
+    rw [wr_ferry_update]
+    exact Step.sail _ (r.fe.new f) b
+      ((r.serves _ _).mpr (by simpa only [r.fe.old_new] using hr))
+      (by simpa [wrState,r.fe.old_new] using hn)
+      ⟨ir_new_bound r.fe hv.1,hv.2⟩
+  | load p t a hp ht room hv =>
+    rw [wr_parcel_update]
+    exact Step.load _ (r.pa.new p) (r.tr.new t) a
+      (by simp [wrState,wrParcel,r.pa.old_new,hp])
+      (by simp [wrState,wrTruck,r.tr.old_new,ht])
+      (by rw [wr_load,r.weight,r.capacity,r.tr.old_new,r.pa.old_new]; exact room)
+      ⟨ir_new_bound r.pa hv.1,ir_new_bound r.tr hv.2.1,hv.2.2⟩
+  | unload p t a hp ht hv =>
+    rw [wr_parcel_update]
+    exact Step.unload _ (r.pa.new p) (r.tr.new t) a
+      (by simp [wrState,wrParcel,r.pa.old_new,hp])
+      (by simp [wrState,wrTruck,r.tr.old_new,ht])
+      ⟨ir_new_bound r.pa hv.1,ir_new_bound r.tr hv.2.1,hv.2.2⟩
+
+theorem wr_path (r : WorldRename w) {s u : State} {m h : Nat} (p : Path (Step w) s u m h) :
+    Path (Step w) (wrState r s) (wrState r u) m h := by
+  induction p with
+  | nil s => exact Path.nil _
+  | cons st rest ih => exact Path.cons (wr_step r st) ih
+
+theorem wr_goal (r : WorldRename w) (s : State) (h : Goal w s) : Goal w (wrState r s) := by
+  intro p hp
+  simp [wrState,wrParcel,h _ (ir_old_bound r.pa hp),r.destination p]
+
+def WorldRename.inverse (r : WorldRename w) : WorldRename w where
+  tr := r.tr.inverse
+  fe := r.fe.inverse
+  pa := r.pa.inverse
+  capacity := fun i => by simpa [IndexRename.inverse,r.tr.old_new] using (r.capacity (r.tr.new i)).symm
+  weight := fun i => by simpa [IndexRename.inverse,r.pa.old_new] using (r.weight (r.pa.new i)).symm
+  destination := fun i => by simpa [IndexRename.inverse,r.pa.old_new] using (r.destination (r.pa.new i)).symm
+  slots := fun i => by simpa [IndexRename.inverse,r.fe.old_new] using (r.slots (r.fe.new i)).symm
+  serves := fun i a => by simpa [IndexRename.inverse,r.fe.old_new] using (r.serves (r.fe.new i) a).symm
+
+theorem wr_inverse (r : WorldRename w) (s : State) :
+    wrState r.inverse (wrState r s) = s := by
+  cases s with
+  | mk tr fe pa =>
+    have ht : (wrState r.inverse (wrState r ⟨tr,fe,pa⟩)).truck = tr := by
+      funext i
+      simp only [wrState,WorldRename.inverse,IndexRename.inverse,r.tr.old_new]
+      cases tr i <;> simp [wrTruck,WorldRename.inverse,IndexRename.inverse,r.fe.old_new]
+    have hf : (wrState r.inverse (wrState r ⟨tr,fe,pa⟩)).ferry = fe := by
+      funext i
+      simp [wrState,WorldRename.inverse,IndexRename.inverse,r.fe.old_new]
+    have hp : (wrState r.inverse (wrState r ⟨tr,fe,pa⟩)).parcel = pa := by
+      funext i
+      simp only [wrState,WorldRename.inverse,IndexRename.inverse,r.pa.old_new]
+      cases pa i <;> simp [wrParcel,WorldRename.inverse,IndexRename.inverse,r.tr.old_new]
+    cases he : wrState r.inverse (wrState r ⟨tr,fe,pa⟩) with
+    | mk t f p =>
+      rw [he] at ht hf hp
+      simp only at ht hf hp
+      simp [ht,hf,hp]
+
+theorem wr_optimal (r : WorldRename w) (s : State) (cost : Nat) :
+    OptimalCompletion w s cost ↔ OptimalCompletion w (wrState r s) cost := by
+  constructor
+  · intro opt
+    constructor
+    · obtain ⟨u,m,h,p,g,hc⟩ := opt.1
+      exact ⟨wrState r u,m,h,wr_path r p,wr_goal r u g,hc⟩
+    · intro u m h p g
+      have q := wr_path r.inverse p
+      rw [wr_inverse] at q
+      exact opt.2 _ _ _ q (wr_goal r.inverse u g)
+  · intro opt
+    constructor
+    · obtain ⟨u,m,h,p,g,hc⟩ := opt.1
+      have q := wr_path r.inverse p
+      rw [wr_inverse] at q
+      exact ⟨wrState r.inverse u,m,h,q,wr_goal r.inverse u g,hc⟩
+    · intro u m h p g
+      exact opt.2 _ _ _ (wr_path r p) (wr_goal r u g)
+
+#print axioms wr_step
+#print axioms wr_path
+#print axioms wr_optimal
+
+end IslandLogistics
