@@ -9572,22 +9572,19 @@ theorem port_ret_map_setAt {α β : Type} (m : α → β) (f : Nat → α)
 theorem port_ret_truck_update {w : World} (r : PortRetractionSpec w)
     (base s : State) (t : Nat) (p : TruckPosition) :
     portRetState r base {s with truck := setAt s.truck t p} =
-      {portRetState r base s with truck :=
-        setAt (portRetState r base s).truck t (portRetTruck r.loc p)} := by
+      {portRetState r base s with truck := setAt (portRetState r base s).truck t (portRetTruck r.loc p)} := by
   simp only [portRetState,port_ret_map_setAt]
 
 theorem port_ret_parcel_update {w : World} (r : PortRetractionSpec w)
     (base s : State) (p : Nat) (v : ParcelPosition) :
     portRetState r base {s with parcel := setAt s.parcel p v} =
-      {portRetState r base s with parcel :=
-        setAt (portRetState r base s).parcel p (portRetParcel r.loc v)} := by
+      {portRetState r base s with parcel := setAt (portRetState r base s).parcel p (portRetParcel r.loc v)} := by
   simp only [portRetState,port_ret_map_setAt]
 
 theorem port_ret_ferry_update {w : World} (r : PortRetractionSpec w)
     (base s : State) (f b : Nat) :
     portRetState r base {s with ferry := setAt s.ferry f b} =
-      {portRetState r base s with ferry := setAt (portRetState r base s).ferry f
-        (if 0 < w.slots f then r.loc b else base.ferry f)} := by
+      {portRetState r base s with ferry := setAt (portRetState r base s).ferry f (if 0 < w.slots f then r.loc b else base.ferry f)} := by
   simp only [portRetState, State.mk.injEq, true_and, and_true]
   funext g
   by_cases he : g = f
@@ -9704,7 +9701,7 @@ theorem port_ret_path {w : World} (r : PortRetractionSpec w) (base : State)
     rcases port_ret_step r base st v with ⟨he,hb⟩ | hm
     · subst b
       rw [← he] at hp
-      exact ⟨d,by omega,hp⟩
+      exact ⟨d,by omega,by simpa only [Nat.zero_add] using hp⟩
     · exact ⟨a+d,by omega,Path.cons
         ⟨hm,port_ret_idem r base s,port_ret_idem r base t⟩ hp⟩
 
