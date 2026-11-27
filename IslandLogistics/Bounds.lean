@@ -8758,3 +8758,336 @@ theorem ride_initial_credit (r : RideSpec w) (s : State)
 #print axioms ride_occ_replace_eq
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Full simulation of the six concrete legal actions into the deferred
+-- ride abstraction. Each step is charged only to ferry/service cost.
+theorem ride_table_step (r : RideSpec w) (C : Nat) (tab : RideTable w r C)
+    (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    {s u : State} {a : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u a m h) (v : CarrierInvariant w s)
+    (A : Nat → Fin (r.size+1)) (anch : RideAnchored r s A) :
+    ∃ B, RideAnchored r u B ∧
+      tab.value (rideView r s A) + rideCredit r u B ≤
+        serviceCount a + 3*sailCount a + tab.value (rideView r u B) + rideCredit r s A := by
+  cases st with
+  | drive t a b ht hr hv =>
+    let u := {s with truck := setAt s.truck t (.land b)}
+    have ho : ∀ f, occupancy w u f = occupancy w s f := by
+      intro f
+      exact ride_occ_replace_eq w s t f (.land b) (by simp [ht])
+    have htruck : ∀ q, q < w.trucks → rideTruck r s A q = rideTruck r u A q := by
+      intro q hq
+      by_cases he : q = t
+      · subst q; simp [rideTruck,u,setAt,ht,r.road a b hr]
+      · simp [rideTruck,u,setAt,he]
+    have hvw := ride_view_congr r (s := s) (u := u) (A := A) (B := A)
+      (by intros; rfl) htruck (ride_parcel_congr r v.parcels htruck rfl)
+    have hcr := ride_credit_same r (s := s) (u := u) (A := A) (B := A)
+      (fun f _ => (ho f).symm) (by intros; rfl) (by intros; rfl)
+    refine ⟨A,?_,?_⟩
+    · intro f hf hz
+      exact anch f hf (by simpa [ho f] using hz)
+    · change tab.value (rideView r s A) + rideCredit r u A ≤
+        serviceCount (.drive t a b) + 3*sailCount (.drive t a b) +
+          tab.value (rideView r u A) + rideCredit r s A
+      rw [← hvw,← hcr]
+      simp [serviceCount,sailCount]
+  | board t f a ht hf hr room hv =>
+    let u := {s with truck := setAt s.truck t (.onFerry f)}
+    have hz : occupancy w s f = 0 := by
+      have hs := r.oneSlot f hv.2.1
+      omega
+    have hone : occupancy w u f = 1 := by
+      have hb := occupancy_after_board w s t f a hv.1 ht
+      change occupancy w u f = occupancy w s f+1 at hb
+      omega
+    have ho : ∀ g, g ≠ f → occupancy w u g = occupancy w s g := by
+      intro g hg
+      exact ride_occ_replace_eq w s t g (.onFerry f) (by simp [ht,Ne.symm hg])
+    have heq := anch f hv.2.1 hz
+    have htruck : ∀ q, q < w.trucks → rideTruck r s A q = rideTruck r u A q := by
+      intro q hq
+      by_cases he : q = t
+      · subst q; simp [rideTruck,u,setAt,ht,heq,hf]
+      · simp [rideTruck,u,setAt,he]
+    have hvw := ride_view_congr r (s := s) (u := u) (A := A) (B := A)
+      (by intros; rfl) htruck (ride_parcel_congr r v.parcels htruck rfl)
+    have hc := ride_credit_local r (s := s) (u := u) (A := A) (B := A)
+      f 0 1 hv.2.1
+      (by intro g hg; simp [rideCreditAt,u,← ho g hg])
+      (by simp [rideCreditAt,hz,hone,heq,u])
+    refine ⟨A,?_,?_⟩
+    · intro g hg hzero
+      by_cases he : g = f
+      · subst g
+        change occupancy w u f = 0 at hzero
+        omega
+      · exact anch g hg (by simpa [ho g he] using hzero)
+    · change tab.value (rideView r s A) + rideCredit r u A ≤
+        serviceCount (.board t f a) + 3*sailCount (.board t f a) +
+          tab.value (rideView r u A) + rideCredit r s A
+      rw [← hvw]
+      simp only [serviceCount,sailCount]
+      omega
+  | disembark t f ht hv =>
+    let u := {s with truck := setAt s.truck t (.land (s.ferry f))}
+    let b := r.loc (s.ferry f)
+    let B := setAt A f b
+    let cargo := fun p => decide (s.parcel p = .onTruck t)
+    have hs := v.occupancy f hv.2
+    have hc := r.oneSlot f hv.2
+    have he := occupancy_after_disembark w s t f hv.1 ht
+    change occupancy w s f = occupancy w u f+1 at he
+    have hz : occupancy w u f = 0 := by omega
+    have hone : occupancy w s f = 1 := by omega
+    have pos : 0 < w.slots f := by omega
+    have ho : ∀ g, g ≠ f → occupancy w u g = occupancy w s g := by
+      intro g hg
+      exact ride_occ_replace_eq w s t g (.land (s.ferry f)) (by simp [ht,Ne.symm hg])
+    have other : ∀ q, q < w.trucks → q ≠ t → s.truck q ≠ .onFerry f := by
+      intro q hq hn hqf
+      have hn' := ride_occ_zero_no_passenger w u f q hz hq
+      apply hn'
+      simpa [u,setAt,hn] using hqf
+    have htruck : ∀ q, q < w.trucks → q ≠ t → rideTruck r s A q = rideTruck r u B q := by
+      intro q hq hn
+      cases hqv : s.truck q with
+      | land c => simp [rideTruck,u,setAt,hn,hqv]
+      | onFerry g =>
+        have hgf : g ≠ f := by
+          intro eq
+          subst g
+          exact other q hq hn hqv
+        simp [rideTruck,u,setAt,hn,hqv,B,hgf]
+    have hvw : rideView r u B = rideFullMove (rideView r s A) f t b cargo := by
+      apply ride_view_ext
+      · funext g
+        by_cases hgf : g.val = f
+        · simp [rideView,rideFullMove,B,setAt,hgf,pos]
+        · simp [rideView,rideFullMove,B,setAt,hgf]
+      · funext q
+        by_cases hqt : q.val = t
+        · simp [rideView,rideFullMove,rideTruck,u,setAt,hqt,b]
+        · simpa [rideView,rideFullMove,hqt] using (htruck q.val q.isLt hqt).symm
+      · funext p
+        cases hp : s.parcel p.val with
+        | ground c => simp [rideView,rideFullMove,rideParcel,u,cargo,hp]
+        | onTruck q =>
+          by_cases hqt : q = t
+          · subst q; simp [rideView,rideFullMove,rideParcel,rideTruck,u,cargo,hp,setAt,b]
+          · have hq := v.parcels p.val p.isLt q hp
+            simpa [rideView,rideFullMove,rideParcel,u,cargo,hp,hqt] using
+              (htruck q hq hqt).symm
+    have truckOrigin : (rideView r s A).truck ⟨t,hv.1⟩ = (rideView r s A).ferry ⟨f,hv.2⟩ := by
+      simp [rideView,rideTruck,ht,pos]
+    have parcelOrigin : ∀ p : Fin w.parcels, cargo p.val = true →
+        (rideView r s A).parcel p = (rideView r s A).ferry ⟨f,hv.2⟩ := by
+      intro p hp
+      have hp' : s.parcel p.val = .onTruck t := by simpa [cargo] using hp
+      simp [rideView,rideParcel,rideTruck,hp',ht,pos]
+    have cargoFit : sumN (fun p => if cargo p then w.weight p else 0) w.parcels ≤ C := by
+      have hload := Nat.le_trans (v.loads t hv.1) (cap t hv.1)
+      simpa [cargo,load] using hload
+    have hother : ∀ g, g ≠ f → rideCreditAt r s A g = rideCreditAt r u B g := by
+      intro g hg
+      have hg' := ho g hg
+      simp [rideCreditAt,← hg',u,B,setAt,hg]
+    have hanch : RideAnchored r u B := by
+      intro g hg hgzero
+      by_cases heq : g = f
+      · simp [B,setAt,heq,u,b]
+      · have ho' : occupancy w s g = 0 := by
+          rw [← ho g heq]
+          exact hgzero
+        simpa [B,setAt,heq,u] using anch g hg ho'
+    refine ⟨B,hanch,?_⟩
+    change tab.value (rideView r s A) + rideCredit r u B ≤
+      serviceCount (.disembark t f) + 3*sailCount (.disembark t f) +
+        tab.value (rideView r u B) + rideCredit r s A
+    simp only [serviceCount,sailCount]
+    by_cases same : A f = b
+    · have hid : rideFullMove (rideView r s A) f t b cargo = rideView r s A := by
+        apply ride_full_identity
+        · intro g hg
+          simp [rideView,hg,pos,same]
+        · intro q hq
+          simp [rideView,rideTruck,hq,ht,same]
+        · intro p hp
+          rw [parcelOrigin p hp]
+          simp [rideView,pos,same]
+      have hbudget := ride_credit_local r (s := s) (u := u) (A := A) (B := B)
+        f 0 1 hv.2 hother (by simp [rideCreditAt,hz,hone,same,b])
+      rw [hvw,hid]
+      omega
+    · have hvb := tab.full (rideView r s A) f t b cargo hv.2 hv.1 pos
+        truckOrigin parcelOrigin cargoFit
+      rw [← hvw] at hvb
+      have hbudget := ride_credit_local r (s := s) (u := u) (A := A) (B := B)
+        f 5 1 hv.2 hother (by simp [rideCreditAt,hz,hone,same,b])
+      omega
+  | sail f b hr hn hv =>
+    let u := {s with ferry := setAt s.ferry f b}
+    by_cases hz : occupancy w s f = 0
+    · let B := setAt A f (r.loc b)
+      have htruck : ∀ q, q < w.trucks → rideTruck r s A q = rideTruck r u B q := by
+        intro q hq
+        cases hqv : s.truck q with
+        | land c => simp [rideTruck,u,hqv]
+        | onFerry g =>
+          have hgf : g ≠ f := by
+            intro he
+            subst g
+            exact ride_occ_zero_no_passenger w s f q hz hq hqv
+          simp [rideTruck,u,hqv,B,setAt,hgf]
+      have hparcel := ride_parcel_congr r v.parcels htruck rfl
+      have hother : ∀ g, g ≠ f → rideCreditAt r s A g = rideCreditAt r u B g := by
+        intro g hg
+        simp [rideCreditAt,occupancy,u,B,setAt,hg]
+      have hzero : occupancy w u f = 0 := hz
+      have hanch : RideAnchored r u B := by
+        intro g hg hgzero
+        by_cases he : g = f
+        · simp [B,u,setAt,he]
+        · simpa [B,u,setAt,he] using anch g hg hgzero
+      refine ⟨B,hanch,?_⟩
+      change tab.value (rideView r s A) + rideCredit r u B ≤
+        serviceCount (.sail f b) + 3*sailCount (.sail f b) +
+          tab.value (rideView r u B) + rideCredit r s A
+      simp only [serviceCount,sailCount]
+      by_cases pos : 0 < w.slots f
+      · have hvw : rideView r u B = rideEmptyMove (rideView r s A) f (r.loc b) := by
+          apply ride_view_ext
+          · funext g
+            by_cases hgf : g.val = f
+            · simp [rideView,rideEmptyMove,B,setAt,hgf,pos]
+            · simp [rideView,rideEmptyMove,B,setAt,hgf]
+          · funext q
+            exact (htruck q.val q.isLt).symm
+          · funext p
+            exact (hparcel p.val p.isLt).symm
+        have hvb := tab.empty (rideView r s A) f (r.loc b) hv.1 pos
+        rw [← hvw] at hvb
+        have hbudget := ride_credit_local r (s := s) (u := u) (A := A) (B := B)
+          f 3 3 hv.1 hother (by simp [rideCreditAt,hz,hzero])
+        omega
+      · have hvw := ride_view_congr r (s := s) (u := u) (A := A) (B := B)
+          (by
+            intro g hg hp
+            have hgf : g ≠ f := by
+              intro he
+              subst g
+              exact pos hp
+            simp [B,setAt,hgf]) htruck hparcel
+        have hbudget := ride_credit_local r (s := s) (u := u) (A := A) (B := B)
+          f 0 3 hv.1 hother (by simp [rideCreditAt,hz,hzero])
+        rw [← hvw]
+        omega
+    · have hother : ∀ g, g ≠ f → rideCreditAt r s A g = rideCreditAt r u A g := by
+        intro g hg
+        simp [rideCreditAt,occupancy,u,setAt,hg]
+      have hzero : occupancy w u f ≠ 0 := hz
+      have hbudget := ride_credit_local r (s := s) (u := u) (A := A) (B := A)
+        f 0 3 hv.1 hother (by
+          simp only [rideCreditAt,hz,hzero,if_false]
+          split <;> split <;> omega)
+      refine ⟨A,?_,?_⟩
+      · intro g hg hgzero
+        by_cases he : g = f
+        · subst g
+          exact False.elim (hzero hgzero)
+        · simpa [u,setAt,he] using anch g hg hgzero
+      · have hvw : rideView r s A = rideView r u A := rfl
+        change tab.value (rideView r s A) + rideCredit r u A ≤
+          serviceCount (.sail f b) + 3*sailCount (.sail f b) +
+            tab.value (rideView r u A) + rideCredit r s A
+        rw [← hvw]
+        simp only [serviceCount,sailCount]
+        omega
+  | load p t a hp ht room hv =>
+    let u := {s with parcel := setAt s.parcel p (.onTruck t)}
+    have hvw := ride_view_congr r (s := s) (u := u) (A := A) (B := A)
+      (by intros; rfl) (by intros; rfl) (by
+        intro q hq
+        by_cases he : q = p
+        · subst q; simp [rideParcel,rideTruck,u,setAt,hp,ht]
+        · simp [rideParcel,rideTruck,u,setAt,he])
+    have hcr : rideCredit r s A = rideCredit r u A := rfl
+    refine ⟨A,anch,?_⟩
+    change tab.value (rideView r s A) + rideCredit r u A ≤
+      serviceCount (.load p t a) + 3*sailCount (.load p t a) +
+        tab.value (rideView r u A) + rideCredit r s A
+    rw [← hvw,← hcr]
+    simp [serviceCount,sailCount]
+  | unload p t a hp ht hv =>
+    let u := {s with parcel := setAt s.parcel p (.ground a)}
+    have hvw := ride_view_congr r (s := s) (u := u) (A := A) (B := A)
+      (by intros; rfl) (by intros; rfl) (by
+        intro q hq
+        by_cases he : q = p
+        · subst q; simp [rideParcel,rideTruck,u,setAt,hp,ht]
+        · simp [rideParcel,rideTruck,u,setAt,he])
+    have hcr : rideCredit r s A = rideCredit r u A := rfl
+    refine ⟨A,anch,?_⟩
+    change tab.value (rideView r s A) + rideCredit r u A ≤
+      serviceCount (.unload p t a) + 3*sailCount (.unload p t a) +
+        tab.value (rideView r u A) + rideCredit r s A
+    rw [← hvw,← hcr]
+    simp [serviceCount,sailCount]
+
+theorem ride_table_trace (r : RideSpec w) (C : Nat) (tab : RideTable w r C)
+    (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {d x f : Nat}
+    (counts : TraceCounts w tr d x f) (v : CarrierInvariant w s)
+    (A : Nat → Fin (r.size+1)) (anch : RideAnchored r s A) :
+    ∃ B, RideAnchored r u B ∧
+      tab.value (rideView r s A) + rideCredit r u B ≤
+        x+3*f+tab.value (rideView r u B)+rideCredit r s A := by
+  induction counts with
+  | nil s => exact ⟨A,anch,by omega⟩
+  | @cons s u' u a b m h st tail act d x f lab rest ih =>
+    obtain ⟨B,hB,h1⟩ := ride_table_step r C tab cap lab v A anch
+    obtain ⟨D,hD,h2⟩ := ih (step_carrier_invariant w st v) B hB
+    exact ⟨D,hD,by omega⟩
+
+def rideAboardCount (w : World) (s : State) : Nat :=
+  sumN (fun t => match s.truck t with | .land _ => 0 | .onFerry _ => 1) w.trucks
+
+def rideEstimate (r : RideSpec w) (C : Nat) (tab : RideTable w r C) (s : State) : Nat :=
+  tab.value (rideView r s (rideInitial r s)) - rideAboardCount w s
+
+theorem stock_ride_admissible (r : RideSpec w) (C : Nat) (tab : RideTable w r C)
+    (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {d x f : Nat}
+    (counts : TraceCounts w tr d x f) (v : CarrierInvariant w s) (done : Goal w u) :
+    rideEstimate r C tab s ≤ x+3*f := by
+  obtain ⟨B,_,hb⟩ := ride_table_trace r C tab cap counts v (rideInitial r s)
+    (by intros; rfl)
+  have hg : tab.value (rideView r u B) = 0 := by
+    apply tab.goal
+    intro p
+    simp [rideView,rideParcel,done p.val p.isLt]
+  have hc := ride_initial_credit r s v
+  change rideCredit r s (rideInitial r s) = rideAboardCount w s at hc
+  rw [hg,hc] at hb
+  unfold rideEstimate
+  omega
+
+theorem stock_ride_road_partition (r : RideSpec w) (C : Nat) (tab : RideTable w r C)
+    (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {d x f roadBound : Nat}
+    (counts : TraceCounts w tr d x f) (v : CarrierInvariant w s) (done : Goal w u)
+    (rd : roadBound ≤ d) :
+    roadBound + rideEstimate r C tab s ≤ m := by
+  have hs := stock_ride_admissible r C tab cap counts v done
+  have hm := trace_count_movement w counts
+  omega
+
+#print axioms ride_table_step
+#print axioms ride_table_trace
+#print axioms stock_ride_admissible
+#print axioms stock_ride_road_partition
+
+end IslandLogistics
