@@ -10418,3 +10418,215 @@ theorem effective_completed_port_budget (w : World)
 #print axioms effective_completed_port_budget
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Concrete arc witnesses retain the exact event that carried each
+-- parcel. A ride returning to its anchor contributes no hub arcs.
+def eventHubArcs (g : HubGraphCertificate w) (e : EffectiveEvent) : List (Nat × Nat) :=
+  match e.action with
+  | .drive _ a b => [(a,b)]
+  | .disembark t f =>
+    if e.anchor t = e.source.ferry f then []
+    else [(e.anchor t,g.hub f),(g.hub f,e.source.ferry f)]
+  | _ => []
+
+def eventCarrier (e : EffectiveEvent) : Nat :=
+  match e.action with
+  | .drive t _ _ | .disembark t _ => t
+  | _ => 0
+
+def eventHasCargo (e : EffectiveEvent) (p : Nat) : Bool :=
+  decide (e.source.parcel p = .onTruck (eventCarrier e))
+
+theorem event_leg_walk (w : World) (g : HubGraphCertificate w)
+    {s : State} {p : Nat} {act : ActionLabel} {a b : Nat}
+    (leg : EffectiveParcelLeg w s p act a b) (v : CarrierInvariant w s)
+    (A : Nat → Nat)
+    (fromAnchor : ∀ t f, act = .disembark t f → a = A t) :
+    ∃ walk, PassengerWalk g.edges a b walk ∧
+      ∀ arc ∈ walk, arc ∈ eventHubArcs g ⟨s,A,act⟩ ∧
+        eventHasCargo ⟨s,A,act⟩ p = true := by
+  cases leg with
+  | road t a b ht hp hr =>
+    refine ⟨[(a,b)],PassengerWalk.cons (g.road a b hr) (PassengerWalk.nil b),?_⟩
+    intro arc hm
+    simp at hm
+    subst arc
+    simp [eventHubArcs,eventHasCargo,eventCarrier,hp]
+  | ride t f a b ht hf hp htruck hfrom hto hport =>
+    have ha := fromAnchor t f rfl
+    have hs := (v.trucks t ht f htruck).2
+    by_cases he : a = b
+    · subst b
+      exact ⟨[],PassengerWalk.nil _,by simp⟩
+    · refine ⟨[(a,g.hub f),(g.hub f,b)],
+        PassengerWalk.cons (g.outward f a hf hs hfrom)
+          (PassengerWalk.cons (g.inward f b hf hs hto) (PassengerWalk.nil b)),?_⟩
+      intro arc hm
+      have hd : A t ≠ s.ferry f := by omega
+      constructor
+      · simpa [eventHubArcs,hd,← ha,← hport] using hm
+      · simp [eventHasCargo,eventCarrier,hp]
+
+theorem effective_trace_event_walk (w : World) (g : HubGraphCertificate w)
+    {s u : State} {A B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s A u B xs m h)
+    (v : CarrierInvariant w s) (anch : EffectiveAnchors w s A) (p : Nat) :
+    ∃ walk, PassengerWalk g.edges (effectiveParcel s A p) (effectiveParcel u B p) walk ∧
+      ∀ arc ∈ walk, ∃ e ∈ xs, arc ∈ eventHubArcs g e ∧ eventHasCargo e p = true := by
+  induction tr with
+  | nil s A => exact ⟨[],PassengerWalk.nil _,by simp⟩
+  | @cons s t u A B act xs a b m h st rest ih =>
+    have v' := step_carrier_invariant w (label_step_sound w st) v
+    have anch' := effective_anchor_step w st A anch
+    obtain ⟨tw,htw,hw⟩ := ih v' anch'
+    rcases effective_parcel_step w st A anch v p with he | leg
+    · refine ⟨tw,by rw [he]; exact htw,?_⟩
+      intro arc ha
+      obtain ⟨e,hm,hx,hc⟩ := hw arc ha
+      exact ⟨e,List.mem_cons_of_mem _ hm,hx,hc⟩
+    · have hanchor : ∀ q f, act = .disembark q f →
+          effectiveParcel s A p = A q := by
+        intro q f he
+        cases leg with
+        | road t x y ht hp hr => cases he
+        | ride t g x y ht hg hp htruck hfrom hto hport =>
+          simp at he
+          obtain ⟨rfl,rfl⟩ := he
+          simp [effectiveParcel,effectiveTruck,hp,htruck]
+      obtain ⟨hd,hhd,hh⟩ := event_leg_walk w g leg v A hanchor
+      refine ⟨hd++tw,effective_walk_append g.edges hhd htw,?_⟩
+      intro arc ha
+      rcases List.mem_append.mp ha with ha | ha
+      · obtain ⟨hx,hc⟩ := hh arc ha
+        exact ⟨⟨s,A,act⟩,by simp,hx,hc⟩
+      · obtain ⟨e,hm,hx,hc⟩ := hw arc ha
+        exact ⟨e,List.mem_cons_of_mem _ hm,hx,hc⟩
+
+theorem hub_simple_event_witness (w : World) (g : HubGraphCertificate w)
+    {s u : State} {B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s (physicalTruck s) u B xs m h)
+    (v : CarrierInvariant w s) (done : Goal w u) (p : Nat) (hp : p < w.parcels) :
+    ∃ path, HubSimplePath g.edges (physicalParcel s p) (w.goal p) path ∧
+      ∀ arc ∈ path, ∃ e ∈ xs, arc ∈ eventHubArcs g e ∧ eventHasCargo e p = true := by
+  obtain ⟨walk,hw,huses⟩ := effective_trace_event_walk w g tr v (effective_initial w s v) p
+  rw [effective_initial_parcel] at hw
+  have he : effectiveParcel u B p = w.goal p := by simp [effectiveParcel,done p hp]
+  rw [he] at hw
+  obtain ⟨path,hp',sub⟩ := hub_loop_erase g.edges hw
+  exact ⟨path,hp',fun arc ha => huses arc (sub arc ha)⟩
+
+theorem effective_event_capacity (w : World) (g : HubGraphCertificate w)
+    {s u : State} {A B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s A u B xs m h)
+    (v : CarrierInvariant w s) (C : Nat)
+    (cap : ∀ t, t < w.trucks → w.capacity t ≤ C) :
+    ∀ e ∈ xs, ∀ arc ∈ eventHubArcs g e, load w e.source (eventCarrier e) ≤ C := by
+  induction tr with
+  | nil s A => simp
+  | @cons s t u A B act xs a b m h st rest ih =>
+    intro e hm arc ha
+    rcases List.mem_cons.mp hm with he | ht
+    · subst e
+      cases st with
+      | drive q x y hq hr hv => exact Nat.le_trans (v.loads q hv.1) (cap q hv.1)
+      | board => simp [eventHubArcs] at ha
+      | disembark q f hq hv => exact Nat.le_trans (v.loads q hv.1) (cap q hv.1)
+      | sail => simp [eventHubArcs] at ha
+      | load => simp [eventHubArcs] at ha
+      | unload => simp [eventHubArcs] at ha
+    · exact ih (step_carrier_invariant w (label_step_sound w st) v) e ht arc ha
+
+-- One bucket per real event using the arc. Assign a parcel to the first
+-- such event carrying it; removing it from later buckets prevents
+-- duplicate weight when its real trace visits the arc several times.
+def hubEventGroups (w : World) :
+    List EffectiveEvent → (Nat → Bool) → List (List Nat)
+  | [], _ => []
+  | e::es, sel =>
+    selectedWeights w (fun p => sel p && eventHasCargo e p) ::
+    hubEventGroups w es (fun p => sel p && !eventHasCargo e p)
+
+theorem hub_event_groups_length (w : World) (es : List EffectiveEvent) (sel : Nat → Bool) :
+    (hubEventGroups w es sel).length = es.length := by
+  induction es generalizing sel with
+  | nil => rfl
+  | cons e es ih => simp [hubEventGroups,ih]
+
+theorem hub_event_groups_perm (w : World) (es : List EffectiveEvent) (sel : Nat → Bool)
+    (cover : ∀ p, p < w.parcels → sel p = true →
+      ∃ e ∈ es, eventHasCargo e p = true) :
+    List.Perm (selectedWeights w sel) (hubEventGroups w es sel).flatten := by
+  induction es generalizing sel with
+  | nil =>
+    have hz : ∀ p, p < w.parcels → sel p = false := by
+      intro p hp
+      cases he : sel p
+      · rfl
+      · obtain ⟨e,hm,_⟩ := cover p hp he
+        simp at hm
+    simp [hubEventGroups,selectedWeight_empty w sel hz]
+  | cons e es ih =>
+    have hc : ∀ p, p < w.parcels → (sel p && !eventHasCargo e p) = true →
+        ∃ e' ∈ es, eventHasCargo e' p = true := by
+      intro p hp h
+      have hs : sel p = true ∧ eventHasCargo e p = false := by simpa using h
+      obtain ⟨e',hm,hp'⟩ := cover p hp hs.1
+      rcases List.mem_cons.mp hm with eq | hm
+      · subst e'; simp [hs.2] at hp'
+      · exact ⟨e',hm,hp'⟩
+    have hsplit := selectedWeight_split w sel (eventHasCargo e)
+    have hrest := ih (fun p => sel p && !eventHasCargo e p) hc
+    exact hsplit.trans (List.Perm.append_left _ hrest)
+
+theorem hub_event_groups_fit (w : World) (es : List EffectiveEvent)
+    (sel : Nat → Bool) (C : Nat)
+    (fits : ∀ e ∈ es, load w e.source (eventCarrier e) ≤ C) :
+    ∀ group ∈ hubEventGroups w es sel, group.sum ≤ C := by
+  induction es generalizing sel with
+  | nil => simp [hubEventGroups]
+  | cons e es ih =>
+    intro group hm
+    simp only [hubEventGroups,List.mem_cons] at hm
+    rcases hm with eq | hm
+    · subst group
+      have h := selectedWeight_carrier_le w e.source (eventCarrier e)
+        (fun p => sel p && eventHasCargo e p) (by
+          intro p hp hs
+          have hc : eventHasCargo e p = true := (Bool.and_eq_true.mp hs).2
+          simpa [eventHasCargo] using hc)
+      exact Nat.le_trans h (fits e (by simp))
+    · exact ih _ (fun z hz => fits z (List.mem_cons_of_mem _ hz)) group hm
+
+theorem hub_arc_bin_from_real_trace (w : World) (g : HubGraphCertificate w)
+    {s u : State} {B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s (physicalTruck s) u B xs m h)
+    (v : CarrierInvariant w s) (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (seed : BinState) (arc : Nat × Nat) (sel : Nat → Bool)
+    (witness : ∀ p, p < w.parcels → sel p = true →
+      ∃ e ∈ xs, arc ∈ eventHubArcs g e ∧ eventHasCargo e p = true) :
+    (binDP C seed (selectedWeights w sel).length (selectedWeights w sel)).1 ≤
+      (xs.filter (fun e => (eventHubArcs g e).contains arc)).length := by
+  let es := xs.filter (fun e => (eventHubArcs g e).contains arc)
+  have cover : ∀ p, p < w.parcels → sel p = true →
+      ∃ e ∈ es, eventHasCargo e p = true := by
+    intro p hp hs
+    obtain ⟨e,hm,ha,hc⟩ := witness p hp hs
+    exact ⟨e,List.mem_filter.mpr ⟨hm,by simpa using ha⟩,hc⟩
+  have fits : ∀ e ∈ es, load w e.source (eventCarrier e) ≤ C := by
+    intro e he
+    obtain ⟨hm,ha⟩ := List.mem_filter.mp he
+    exact effective_event_capacity w g tr v C cap e hm arc (by simpa using ha)
+  have hb := binDP_le_feasible_groups C seed _ _
+    (hub_event_groups_perm w es sel cover) (hub_event_groups_fit w es sel C fits)
+  rw [hub_event_groups_length] at hb
+  exact hb
+
+#print axioms hub_simple_event_witness
+#print axioms effective_event_capacity
+#print axioms hub_event_groups_perm
+#print axioms hub_arc_bin_from_real_trace
+
+end IslandLogistics
