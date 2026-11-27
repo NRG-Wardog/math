@@ -10080,7 +10080,7 @@ theorem effective_parcel_step (w : World) {s u : State} {a : ActionLabel} {m h :
   cases st with
   | drive t a b ht hr hv =>
     cases hp : s.parcel p with
-    | ground x => exact Or.inl rfl
+    | ground x => exact Or.inl (by simp [effectiveParcel,effectiveNext,hp])
     | onTruck q =>
       by_cases he : q = t
       · subst q
@@ -10099,7 +10099,7 @@ theorem effective_parcel_step (w : World) {s u : State} {a : ActionLabel} {m h :
           simp [effectiveParcel,effectiveTruck,effectiveNext,hp,hq,setAt,he]
   | disembark t f ht hv =>
     cases hp : s.parcel p with
-    | ground x => exact Or.inl rfl
+    | ground x => exact Or.inl (by simp [effectiveParcel,effectiveNext,hp])
     | onTruck q =>
       by_cases he : q = t
       · subst q
@@ -10152,7 +10152,7 @@ theorem effective_walk_append (edges : List (Nat × Nat))
     PassengerWalk edges a c (xs++ys) := by
   induction p with
   | nil a => exact q
-  | cons he rest ih => exact PassengerWalk.cons he ih
+  | cons he rest ih => exact PassengerWalk.cons he (ih q)
 
 -- Every legal completion supplies a common anchored trace. For each
 -- parcel it yields a concrete directed hub walk. Loop erasure then gives
