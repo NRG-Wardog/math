@@ -9995,3 +9995,207 @@ theorem astar_goal_pop_optimal {S : Type}
 #print axioms astar_goal_pop_optimal
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- A common shadow semantics for ALL usable ferries, including ferries
+-- carrying several trucks which boarded at different ports.
+def effectiveTruck (s : State) (anchor : Nat → Nat) (t : Nat) : Nat :=
+  match s.truck t with
+  | .land a => a
+  | .onFerry _ => anchor t
+
+def effectiveParcel (s : State) (anchor : Nat → Nat) (p : Nat) : Nat :=
+  match s.parcel p with
+  | .ground a => a
+  | .onTruck t => effectiveTruck s anchor t
+
+def effectiveNext (anchor : Nat → Nat) (a : ActionLabel) : Nat → Nat :=
+  match a with
+  | .board t _ x => setAt anchor t x
+  | _ => anchor
+
+def EffectiveAnchors (w : World) (s : State) (anchor : Nat → Nat) : Prop :=
+  ∀ t f, t < w.trucks → s.truck t = .onFerry f → w.route f (anchor t)
+
+theorem effective_initial (w : World) (s : State) (v : CarrierInvariant w s) :
+    EffectiveAnchors w s (physicalTruck s) := by
+  intro t f ht hf
+  have hb := v.trucks t ht f hf
+  simpa [physicalTruck,hf] using v.ferries f hb.1
+
+theorem effective_initial_parcel (s : State) (p : Nat) :
+    effectiveParcel s (physicalTruck s) p = physicalParcel s p := by
+  cases hp : s.parcel p with
+  | ground a => simp [effectiveParcel,physicalParcel,hp]
+  | onTruck t =>
+    cases ht : s.truck t <;> simp [effectiveParcel,physicalParcel,effectiveTruck,physicalTruck,hp,ht]
+
+theorem effective_anchor_step (w : World) {s u : State} {a : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u a m h) (A : Nat → Nat) (v : EffectiveAnchors w s A) :
+    EffectiveAnchors w u (effectiveNext A a) := by
+  cases st with
+  | drive t a b ht hr hv =>
+    intro q f hq hf
+    by_cases he : q = t
+    · subst q; simp [setAt] at hf
+    · exact v q f hq (by simpa [setAt,he] using hf)
+  | board t f a ht hf hr room hv =>
+    intro q g hq hg
+    by_cases he : q = t
+    · subst q
+      have hgf : f = g := by simpa [setAt] using hg
+      subst g
+      simpa [effectiveNext,setAt] using hr
+    · have hs : s.truck q = .onFerry g := by simpa [setAt,he] using hg
+      simpa [effectiveNext,setAt,he] using v q g hq hs
+  | disembark t f ht hv =>
+    intro q g hq hg
+    by_cases he : q = t
+    · subst q; simp [setAt] at hg
+    · exact v q g hq (by simpa [setAt,he] using hg)
+  | sail f b hr hn hv => exact v
+  | load p t a hp ht room hv => exact v
+  | unload p t a hp ht hv => exact v
+
+-- One parcel's projected move is either a real DRIVE, or one complete
+-- occupied ride ending in a real DISEMBARK. It is never one move per
+-- intermediate SAIL. The source-state load supplies the capacity witness.
+inductive EffectiveParcelLeg (w : World) (s : State) (p : Nat) :
+    ActionLabel → Nat → Nat → Prop where
+  | road (t a b : Nat) : t < w.trucks → s.parcel p = .onTruck t →
+      w.road a b → EffectiveParcelLeg w s p (.drive t a b) a b
+  | ride (t f a b : Nat) : t < w.trucks → f < w.ferries →
+      s.parcel p = .onTruck t → s.truck t = .onFerry f →
+      w.route f a → w.route f b → b = s.ferry f →
+      EffectiveParcelLeg w s p (.disembark t f) a b
+
+theorem effective_parcel_step (w : World) {s u : State} {a : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u a m h) (A : Nat → Nat)
+    (anch : EffectiveAnchors w s A) (v : CarrierInvariant w s) (p : Nat) :
+    effectiveParcel s A p = effectiveParcel u (effectiveNext A a) p ∨
+      EffectiveParcelLeg w s p a (effectiveParcel s A p)
+        (effectiveParcel u (effectiveNext A a) p) := by
+  cases st with
+  | drive t a b ht hr hv =>
+    cases hp : s.parcel p with
+    | ground x => exact Or.inl rfl
+    | onTruck q =>
+      by_cases he : q = t
+      · subst q
+        exact Or.inr (by
+          simpa [effectiveParcel,effectiveTruck,effectiveNext,hp,ht,setAt] using
+            (EffectiveParcelLeg.road (w := w) (s := s) (p := p) t a b hv.1 hp hr))
+      · left; simp [effectiveParcel,effectiveTruck,effectiveNext,hp,setAt,he]
+  | board t f a ht hf hr room hv =>
+    left
+    cases hp : s.parcel p with
+    | ground x => simp [effectiveParcel,effectiveNext,hp]
+    | onTruck q =>
+      by_cases he : q = t
+      · subst q; simp [effectiveParcel,effectiveTruck,effectiveNext,hp,ht,setAt]
+      · cases hq : s.truck q <;>
+          simp [effectiveParcel,effectiveTruck,effectiveNext,hp,hq,setAt,he]
+  | disembark t f ht hv =>
+    cases hp : s.parcel p with
+    | ground x => exact Or.inl rfl
+    | onTruck q =>
+      by_cases he : q = t
+      · subst q
+        have h1 := anch t f hv.1 ht
+        have h2 := v.ferries f hv.2
+        exact Or.inr (by
+          simpa [effectiveParcel,effectiveTruck,effectiveNext,hp,ht,setAt] using
+            (EffectiveParcelLeg.ride (w := w) (s := s) (p := p) t f (A t) (s.ferry f)
+              hv.1 hv.2 hp ht h1 h2 rfl))
+      · left; simp [effectiveParcel,effectiveTruck,effectiveNext,hp,setAt,he]
+  | sail f b hr hn hv => exact Or.inl rfl
+  | load q t a hq ht room hv =>
+    left
+    by_cases he : p = q
+    · subst p; simp [effectiveParcel,effectiveTruck,effectiveNext,hq,ht,setAt]
+    · simp [effectiveParcel,effectiveTruck,effectiveNext,setAt,he]
+  | unload q t a hq ht hv =>
+    left
+    by_cases he : p = q
+    · subst p; simp [effectiveParcel,effectiveTruck,effectiveNext,hq,ht,setAt]
+    · simp [effectiveParcel,effectiveTruck,effectiveNext,setAt,he]
+
+-- This finite graph contains every physical road and every usable
+-- port-to-fleet-hub edge. Fleet grouping may identify several ferries.
+structure HubGraphCertificate (w : World) where
+  edges : List (Nat × Nat)
+  hub : Nat → Nat
+  road : ∀ a b, w.road a b → (a,b) ∈ edges
+  outward : ∀ f a, f < w.ferries → 0 < w.slots f → w.route f a →
+    (a,hub f) ∈ edges
+  inward : ∀ f a, f < w.ferries → 0 < w.slots f → w.route f a →
+    (hub f,a) ∈ edges
+
+theorem effective_leg_hub_walk (w : World) (g : HubGraphCertificate w)
+    {s : State} {p : Nat} {act : ActionLabel} {a b : Nat}
+    (leg : EffectiveParcelLeg w s p act a b) (v : CarrierInvariant w s) :
+    ∃ walk, PassengerWalk g.edges a b walk := by
+  cases leg with
+  | road t a b ht hp hr =>
+    exact ⟨[(a,b)],PassengerWalk.cons (g.road a b hr) (PassengerWalk.nil b)⟩
+  | ride t f a b ht hf hp htruck hfrom hto hport =>
+    have hs := (v.trucks t ht f htruck).2
+    exact ⟨[(a,g.hub f),(g.hub f,b)],
+      PassengerWalk.cons (g.outward f a hf hs hfrom)
+        (PassengerWalk.cons (g.inward f b hf hs hto) (PassengerWalk.nil b))⟩
+
+theorem effective_walk_append (edges : List (Nat × Nat))
+    {a b c : Nat} {xs ys : List (Nat × Nat)}
+    (p : PassengerWalk edges a b xs) (q : PassengerWalk edges b c ys) :
+    PassengerWalk edges a c (xs++ys) := by
+  induction p with
+  | nil a => exact q
+  | cons he rest ih => exact PassengerWalk.cons he ih
+
+-- Every legal completion supplies a common anchored trace. For each
+-- parcel it yields a concrete directed hub walk. Loop erasure then gives
+-- the simple path enumerated by the HubFlow constructor.
+theorem effective_trace_hub_walk (w : World) (g : HubGraphCertificate w)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (v : CarrierInvariant w s) (A : Nat → Nat)
+    (anch : EffectiveAnchors w s A) :
+    ∃ B, EffectiveAnchors w u B ∧ ∀ p, ∃ walk,
+      PassengerWalk g.edges (effectiveParcel s A p) (effectiveParcel u B p) walk := by
+  induction tr generalizing A with
+  | nil s =>
+    exact ⟨A,anch,fun p => ⟨[],PassengerWalk.nil _⟩⟩
+  | @cons s t u a b m h st tail ih =>
+    obtain ⟨act,lab⟩ := label_step_complete w st
+    have hA := effective_anchor_step w lab A anch
+    obtain ⟨B,hB,walks⟩ := ih (step_carrier_invariant w st v) (effectiveNext A act) hA
+    refine ⟨B,hB,?_⟩
+    intro p
+    obtain ⟨tailwalk,htail⟩ := walks p
+    rcases effective_parcel_step w lab A anch v p with he | leg
+    · exact ⟨tailwalk,by rw [he]; exact htail⟩
+    · obtain ⟨headwalk,hhead⟩ := effective_leg_hub_walk w g leg v
+      exact ⟨headwalk++tailwalk,effective_walk_append g.edges hhead htail⟩
+
+theorem hub_actual_simple_path (w : World) (g : HubGraphCertificate w)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (v : CarrierInvariant w s) (done : Goal w u) (p : Nat) (hp : p < w.parcels) :
+    ∃ walk simple, PassengerWalk g.edges (physicalParcel s p) (w.goal p) walk ∧
+      HubSimplePath g.edges (physicalParcel s p) (w.goal p) simple ∧
+      ∀ e ∈ simple, e ∈ walk := by
+  obtain ⟨B,_,all⟩ := effective_trace_hub_walk w g tr v (physicalTruck s)
+    (effective_initial w s v)
+  obtain ⟨walk,hwalk⟩ := all p
+  rw [effective_initial_parcel] at hwalk
+  have he : effectiveParcel u B p = w.goal p := by simp [effectiveParcel,done p hp]
+  rw [he] at hwalk
+  obtain ⟨simple,hs,sub⟩ := hub_loop_erase g.edges hwalk
+  exact ⟨walk,simple,hwalk,hs,sub⟩
+
+#print axioms effective_anchor_step
+#print axioms effective_parcel_step
+#print axioms effective_trace_hub_walk
+#print axioms hub_actual_simple_path
+
+end IslandLogistics
