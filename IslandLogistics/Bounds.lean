@@ -9246,15 +9246,20 @@ theorem histogram_shift_balance (pos : Nat → Nat) (sel : Nat → Bool)
     simp only [histogramAt,selectedCount,sumN] at prev ⊢
     cases hs : sel k with
     | false =>
+      have hmove : movePositions pos sel b k = pos k := by simp [movePositions,hs]
+      rw [hmove]
+      simp only [hs, Bool.false_eq_true, if_false, Nat.add_zero]
       by_cases ha : z = a <;> by_cases hb : z = b <;>
-        simp [movePositions,hs,ha,hb] at prev ⊢ <;> omega
+        simp only [ha,hb,if_true,if_false] at prev ⊢ <;> omega
     | true =>
       have hp := origin k (by omega) hs
+      have hmove : movePositions pos sel b k = b := by simp [movePositions,hs]
+      rw [hmove,hp]
       have ha' : (a = z) ↔ (z = a) := eq_comm
       have hb' : (b = z) ↔ (z = b) := eq_comm
-      simp only [movePositions,hs,if_true,hp,ha',hb']
+      simp only [hs, if_true, ha', hb']
       by_cases ha : z = a <;> by_cases hb : z = b <;>
-        simp [ha,hb] at prev ⊢ <;> omega
+        simp only [ha,hb,if_true,if_false] at prev ⊢ <;> omega
 
 theorem histogram_shift_exact (pos : Nat → Nat) (sel : Nat → Bool)
     (k a b z : Nat) (origin : ∀ i, i < k → sel i = true → pos i = a) :
@@ -9265,9 +9270,9 @@ theorem histogram_shift_exact (pos : Nat → Nat) (sel : Nat → Bool)
   have hb := histogram_selected_le pos sel k a origin
   by_cases ha : z = a
   · subst z
-    simp only [if_pos rfl] at he ⊢
+    simp only [eq_self,if_true] at he ⊢
     omega
-  · simp [ha] at he ⊢
+  · simp only [ha,if_false] at he ⊢
     omega
 
 #print axioms weak_comps_complete
