@@ -9528,3 +9528,195 @@ theorem demand_rank_no_cycle (edge : Nat → Nat → Prop) (rank : Nat → Nat)
 #print axioms demand_rank_no_cycle
 
 end IslandLogistics
+
+namespace IslandLogistics
+
+-- Retire isolated empty ports into fixed ports served by all the same
+-- usable ferries.  Ferries with zero slots are left at their initial
+-- positions: they can sail but can never carry a truck.
+structure PortRetractionSpec (w : World) where
+  loc : Nat → Nat
+  bound : ∀ a, a < w.locations → loc a < w.locations
+  road : ∀ a b, w.road a b → loc a = a ∧ loc b = b
+  route : ∀ f a, f < w.ferries → 0 < w.slots f →
+    w.route f a → w.route f (loc a)
+  goal : ∀ p, p < w.parcels → loc (w.goal p) = w.goal p
+  idem : ∀ a, loc (loc a) = loc a
+
+def portRetTruck (r : Nat → Nat) : TruckPosition → TruckPosition
+  | .land a => .land (r a)
+  | .onFerry f => .onFerry f
+
+def portRetParcel (r : Nat → Nat) : ParcelPosition → ParcelPosition
+  | .ground a => .ground (r a)
+  | .onTruck t => .onTruck t
+
+def portRetState {w : World} (r : PortRetractionSpec w) (base s : State) : State :=
+  ⟨fun t => portRetTruck r.loc (s.truck t),
+   fun f => if 0 < w.slots f then r.loc (s.ferry f) else base.ferry f,
+   fun p => portRetParcel r.loc (s.parcel p)⟩
+
+theorem port_ret_map_setAt {α β : Type} (m : α → β) (f : Nat → α)
+    (i : Nat) (v : α) :
+    (fun j => m (setAt f i v j)) = setAt (fun j => m (f j)) i (m v) := by
+  funext j
+  by_cases he : j = i <;> simp [setAt,he]
+
+theorem port_ret_truck_update {w : World} (r : PortRetractionSpec w)
+    (base s : State) (t : Nat) (p : TruckPosition) :
+    portRetState r base {s with truck := setAt s.truck t p} =
+      {portRetState r base s with truck :=
+        setAt (portRetState r base s).truck t (portRetTruck r.loc p)} := by
+  simp only [portRetState,port_ret_map_setAt]
+
+theorem port_ret_parcel_update {w : World} (r : PortRetractionSpec w)
+    (base s : State) (p : Nat) (v : ParcelPosition) :
+    portRetState r base {s with parcel := setAt s.parcel p v} =
+      {portRetState r base s with parcel :=
+        setAt (portRetState r base s).parcel p (portRetParcel r.loc v)} := by
+  simp only [portRetState,port_ret_map_setAt]
+
+theorem port_ret_ferry_update {w : World} (r : PortRetractionSpec w)
+    (base s : State) (f b : Nat) :
+    portRetState r base {s with ferry := setAt s.ferry f b} =
+      {portRetState r base s with ferry := setAt (portRetState r base s).ferry f
+        (if 0 < w.slots f then r.loc b else base.ferry f)} := by
+  simp only [portRetState, State.mk.injEq, true_and, and_true]
+  funext g
+  by_cases he : g = f
+  · subst g; simp [setAt]
+  · simp [setAt,he]
+
+theorem port_ret_load {w : World} (r : PortRetractionSpec w)
+    (base s : State) (t : Nat) :
+    load w (portRetState r base s) t = load w s t := by
+  unfold load
+  apply sumN_congr
+  intro p hp
+  cases he : s.parcel p <;> simp [portRetState,portRetParcel,he]
+
+theorem port_ret_occupancy {w : World} (r : PortRetractionSpec w)
+    (base s : State) (f : Nat) :
+    occupancy w (portRetState r base s) f = occupancy w s f := by
+  unfold occupancy
+  apply sumN_congr
+  intro t ht
+  cases he : s.truck t <;> simp [portRetState,portRetTruck,he]
+
+theorem port_ret_idem {w : World} (r : PortRetractionSpec w) (base s : State) :
+    portRetState r base (portRetState r base s) = portRetState r base s := by
+  simp only [portRetState,State.mk.injEq]
+  refine ⟨?_,?_,?_⟩
+  · funext t
+    cases he : s.truck t <;> simp [portRetTruck,he,r.idem]
+  · funext f
+    by_cases hs : 0 < w.slots f <;> simp [hs,r.idem]
+  · funext p
+    cases he : s.parcel p <;> simp [portRetParcel,he,r.idem]
+
+theorem port_ret_step {w : World} (r : PortRetractionSpec w) (base : State)
+    {s u : State} {m h : Nat} (st : Step w s u m h) (v : CarrierInvariant w s) :
+    (portRetState r base s = portRetState r base u ∧ h = 0) ∨
+      Step w (portRetState r base s) (portRetState r base u) m h := by
+  cases st with
+  | drive t a b ht hr hv =>
+    right
+    rw [port_ret_truck_update]
+    have ha := r.road a b hr
+    apply Step.drive (portRetState r base s) t (r.loc a) (r.loc b)
+    · simp [portRetState,portRetTruck,ht]
+    · simpa only [ha.1,ha.2] using hr
+    · exact ⟨hv.1,r.bound a hv.2.1,r.bound b hv.2.2⟩
+  | board t f a ht hf hr room hv =>
+    right
+    rw [port_ret_truck_update]
+    have hs : 0 < w.slots f := by omega
+    apply Step.board (portRetState r base s) t f (r.loc a)
+    · simp [portRetState,portRetTruck,ht]
+    · simp [portRetState,hs,hf]
+    · exact r.route f a hv.2.1 hs hr
+    · rw [port_ret_occupancy]; exact room
+    · exact ⟨hv.1,hv.2.1,r.bound a hv.2.2⟩
+  | disembark t f ht hv =>
+    right
+    rw [port_ret_truck_update]
+    have hs := (v.trucks t hv.1 f ht).2
+    have hd := Step.disembark (w := w) (portRetState r base s) t f
+      (by simp [portRetState,portRetTruck,ht]) hv
+    simpa [portRetState,portRetTruck,hs] using hd
+  | sail f b hr hne hv =>
+    rw [port_ret_ferry_update]
+    by_cases hs : 0 < w.slots f
+    · simp only [hs,if_true]
+      by_cases he : r.loc (s.ferry f) = r.loc b
+      · left
+        have hx : r.loc b = (portRetState r base s).ferry f := by
+          simp [portRetState,hs,he]
+        rw [hx,setAt_current]
+        exact ⟨rfl,rfl⟩
+      · right
+        apply Step.sail (portRetState r base s) f (r.loc b)
+        · exact r.route f b hv.1 hs hr
+        · simpa [portRetState,hs] using he
+        · exact ⟨hv.1,r.bound b hv.2⟩
+    · left
+      simp only [hs,if_false]
+      have hx : base.ferry f = (portRetState r base s).ferry f := by
+        simp [portRetState,hs]
+      rw [hx,setAt_current]
+      exact ⟨rfl,rfl⟩
+  | load p t a hp ht room hv =>
+    right
+    rw [port_ret_parcel_update]
+    apply Step.load (portRetState r base s) p t (r.loc a)
+    · simp [portRetState,portRetParcel,hp]
+    · simp [portRetState,portRetTruck,ht]
+    · rw [port_ret_load]; exact room
+    · exact ⟨hv.1,hv.2.1,r.bound a hv.2.2⟩
+  | unload p t a hp ht hv =>
+    right
+    rw [port_ret_parcel_update]
+    apply Step.unload (portRetState r base s) p t (r.loc a)
+    · simp [portRetState,portRetParcel,hp]
+    · simp [portRetState,portRetTruck,ht]
+    · exact ⟨hv.1,hv.2.1,r.bound a hv.2.2⟩
+
+def PortRestrictedStep {w : World} (r : PortRetractionSpec w) (base : State)
+    (s u : State) (m h : Nat) : Prop :=
+  Step w s u m h ∧ portRetState r base s = s ∧ portRetState r base u = u
+
+theorem port_ret_path {w : World} (r : PortRetractionSpec w) (base : State)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h)
+    (v : CarrierInvariant w s) :
+    ∃ m', m' ≤ m ∧
+      Path (PortRestrictedStep r base) (portRetState r base s) (portRetState r base u) m' h := by
+  induction path with
+  | nil s => exact ⟨0,by omega,Path.nil _⟩
+  | @cons s t u a b m h st tail ih =>
+    obtain ⟨d,hd,hp⟩ := ih (step_carrier_invariant w st v)
+    rcases port_ret_step r base st v with ⟨he,hb⟩ | hm
+    · subst b
+      rw [← he] at hp
+      exact ⟨d,by omega,hp⟩
+    · exact ⟨a+d,by omega,Path.cons
+        ⟨hm,port_ret_idem r base s,port_ret_idem r base t⟩ hp⟩
+
+theorem port_ret_goal {w : World} (r : PortRetractionSpec w) (base s : State)
+    (hg : Goal w s) : Goal w (portRetState r base s) := by
+  intro p hp
+  simp [portRetState,portRetParcel,hg p hp,r.goal p hp]
+
+theorem port_ret_preserves_optimal_witness {w : World} (r : PortRetractionSpec w)
+    (base : State) (fixed : portRetState r base base = base)
+    {u : State} {m h : Nat} (path : Path (Step w) base u m h)
+    (v : CarrierInvariant w base) (hg : Goal w u) :
+    ∃ t m', Goal w t ∧ m' ≤ m ∧ Path (PortRestrictedStep r base) base t m' h := by
+  obtain ⟨d,hd,hp⟩ := port_ret_path r base path v
+  rw [fixed] at hp
+  exact ⟨portRetState r base u,d,port_ret_goal r base u hg,hd,hp⟩
+
+#print axioms port_ret_step
+#print axioms port_ret_path
+#print axioms port_ret_preserves_optimal_witness
+
+end IslandLogistics
