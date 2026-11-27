@@ -8423,6 +8423,7 @@ theorem freeze_load_le (w : World) (s : State) (p t : Nat) :
   · subst q
     simp [freezeDelivered,setAt]
   · rw [freeze_other_position w s p q he]
+    exact Nat.le_refl _
 
 theorem freeze_goal (w : World) (s : State) (p : Nat) (g : Goal w s) :
     Goal w (freezeDelivered w s p) := by
