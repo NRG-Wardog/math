@@ -10319,19 +10319,19 @@ theorem effective_mint_bound (w : World) {s u : State} {act : ActionLabel} {m h 
       exact Nat.zero_le _
   | drive =>
     change sumN (fun _ => 0) w.trucks ≤ 0
-    rw [sumN_zero]
+    simp [sumN_zero]
   | board =>
     change sumN (fun _ => 0) w.trucks ≤ 0
-    rw [sumN_zero]
+    simp [sumN_zero]
   | disembark =>
     change sumN (fun _ => 0) w.trucks ≤ 0
-    rw [sumN_zero]
+    simp [sumN_zero]
   | load =>
     change sumN (fun _ => 0) w.trucks ≤ 0
-    rw [sumN_zero]
+    simp [sumN_zero]
   | unload =>
     change sumN (fun _ => 0) w.trucks ≤ 0
-    rw [sumN_zero]
+    simp [sumN_zero]
 
 theorem effective_port_step_budget (w : World) {s u : State} {act : ActionLabel} {m h : Nat}
     (st : LabelStep w s u act m h) (v : ValidFerryOccupancy w s)
@@ -10459,15 +10459,13 @@ theorem event_leg_walk (w : World) (g : HubGraphCertificate w)
     have ha := fromAnchor t f rfl
     have hs := (v.trucks t ht f htruck).2
     by_cases he : a = b
-    · subst b
-      exact ⟨[],PassengerWalk.nil _,by simp⟩
+    · exact ⟨[],by rw [← he]; exact PassengerWalk.nil _,by simp⟩
     · refine ⟨[(a,g.hub f),(g.hub f,b)],
         PassengerWalk.cons (g.outward f a hf hs hfrom)
           (PassengerWalk.cons (g.inward f b hf hs hto) (PassengerWalk.nil b)),?_⟩
       intro arc hm
-      have hd : A t ≠ s.ferry f := by omega
       constructor
-      · simpa [eventHubArcs,hd,← ha,← hport] using hm
+      · simpa [eventHubArcs,← ha,← hport,he] using hm
       · simp [eventHasCargo,eventCarrier,hp]
 
 theorem effective_trace_event_walk (w : World) (g : HubGraphCertificate w)
@@ -10490,12 +10488,17 @@ theorem effective_trace_event_walk (w : World) (g : HubGraphCertificate w)
     · have hanchor : ∀ q f, act = .disembark q f →
           effectiveParcel s A p = A q := by
         intro q f he
-        cases leg with
-        | road t x y ht hp hr => cases he
-        | ride t g x y ht hg hp htruck hfrom hto hport =>
-          simp at he
-          obtain ⟨rfl,rfl⟩ := he
-          simp [effectiveParcel,effectiveTruck,hp,htruck]
+        have inv : ∀ {ac x y}, EffectiveParcelLeg w s p ac x y →
+            ac = .disembark q f →
+            s.parcel p = .onTruck q ∧ s.truck q = .onFerry f := by
+          intro ac x y lg hact
+          cases lg with
+          | road t x y ht hp hr => cases hact
+          | ride t g x y ht hg hp htruck hfrom hto hport =>
+            cases hact
+            exact ⟨hp,htruck⟩
+        obtain ⟨hp,htruck⟩ := inv leg he
+        simp [effectiveParcel,effectiveTruck,hp,htruck]
       obtain ⟨hd,hhd,hh⟩ := event_leg_walk w g leg v A hanchor
       refine ⟨hd++tw,effective_walk_append g.edges hhd htw,?_⟩
       intro arc ha
@@ -10595,7 +10598,8 @@ theorem hub_event_groups_fit (w : World) (es : List EffectiveEvent)
       have h := selectedWeight_carrier_le w e.source (eventCarrier e)
         (fun p => sel p && eventHasCargo e p) (by
           intro p hp hs
-          have hc : eventHasCargo e p = true := (Bool.and_eq_true.mp hs).2
+          have hc : eventHasCargo e p = true := by
+            cases hh : eventHasCargo e p <;> simp [hh] at hs ⊢
           simpa [eventHasCargo] using hc)
       exact Nat.le_trans h (fits e (by simp))
     · exact ih _ (fun z hz => fits z (List.mem_cons_of_mem _ hz)) group hm
