@@ -8548,3 +8548,213 @@ theorem advance_final_delivery (w : World) (p t : Nat)
 #print axioms advance_final_delivery
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- StockRide projection. The shadow remembers an occupied ferry's port
+-- at the beginning of its current ride; an empty ferry is never deferred.
+-- Abstract positions are Fin, so the finite table's index domain is explicit.
+structure RideSpec (w : World) where
+  size : Nat
+  loc : Nat → Fin (size+1)
+  road : ∀ a b, w.road a b → loc a = loc b
+  oneSlot : ∀ f, f < w.ferries → w.slots f ≤ 1
+
+structure RideView (w : World) (n : Nat) where
+  ferry : Fin w.ferries → Fin (n+1)
+  truck : Fin w.trucks → Fin (n+1)
+  parcel : Fin w.parcels → Fin (n+1)
+
+def rideTruck (r : RideSpec w) (s : State)
+    (A : Nat → Fin (r.size+1)) (t : Nat) : Fin (r.size+1) :=
+  match s.truck t with
+  | .land a => r.loc a
+  | .onFerry f => A f
+
+def rideParcel (r : RideSpec w) (s : State)
+    (A : Nat → Fin (r.size+1)) (p : Nat) : Fin (r.size+1) :=
+  match s.parcel p with
+  | .ground a => r.loc a
+  | .onTruck t => rideTruck r s A t
+
+def rideView (r : RideSpec w) (s : State)
+    (A : Nat → Fin (r.size+1)) : RideView w r.size :=
+  ⟨fun f => if 0 < w.slots f.val then A f.val else 0,
+   fun t => rideTruck r s A t.val, fun p => rideParcel r s A p.val⟩
+
+theorem ride_view_ext {n : Nat} {x y : RideView w n}
+    (hf : x.ferry = y.ferry) (ht : x.truck = y.truck)
+    (hp : x.parcel = y.parcel) : x = y := by
+  cases x; cases y; simp_all
+
+theorem ride_view_congr (r : RideSpec w) {s u : State}
+    {A B : Nat → Fin (r.size+1)}
+    (hf : ∀ f, f < w.ferries → 0 < w.slots f → A f = B f)
+    (ht : ∀ t, t < w.trucks → rideTruck r s A t = rideTruck r u B t)
+    (hp : ∀ p, p < w.parcels → rideParcel r s A p = rideParcel r u B p) :
+    rideView r s A = rideView r u B := by
+  apply ride_view_ext
+  · funext f
+    change (if 0 < w.slots f.val then A f.val else 0) = _
+    by_cases h : 0 < w.slots f.val
+    · simp [rideView,h,hf f.val f.isLt h]
+    · simp [rideView,h]
+  · funext t
+    exact ht t.val t.isLt
+  · funext p
+    exact hp p.val p.isLt
+
+theorem ride_parcel_congr (r : RideSpec w) {s u : State}
+    {A B : Nat → Fin (r.size+1)} (v : ValidParcelCarriers w s)
+    (ht : ∀ t, t < w.trucks → rideTruck r s A t = rideTruck r u B t)
+    (hp : s.parcel = u.parcel) (p : Nat) (hv : p < w.parcels) :
+    rideParcel r s A p = rideParcel r u B p := by
+  cases h : s.parcel p with
+  | ground a => simp [rideParcel,← hp,h]
+  | onTruck t => simpa [rideParcel,← hp,h] using ht t (v p hv t h)
+
+def RideAnchored (r : RideSpec w) (s : State)
+    (A : Nat → Fin (r.size+1)) : Prop :=
+  ∀ f, f < w.ferries → occupancy w s f = 0 → A f = r.loc (s.ferry f)
+
+def rideInitial (r : RideSpec w) (s : State) (f : Nat) : Fin (r.size+1) :=
+  r.loc (s.ferry f)
+
+def rideCreditAt (r : RideSpec w) (s : State)
+    (A : Nat → Fin (r.size+1)) (f : Nat) : Nat :=
+  if occupancy w s f = 0 then 0 else if A f = r.loc (s.ferry f) then 1 else 4
+
+def rideCredit (r : RideSpec w) (s : State)
+    (A : Nat → Fin (r.size+1)) : Nat :=
+  sumN (rideCreditAt r s A) w.ferries
+
+theorem ride_occ_zero_no_passenger (w : World) (s : State) (f t : Nat)
+    (hz : occupancy w s f = 0) (ht : t < w.trucks) :
+    s.truck t ≠ .onFerry f := by
+  intro he
+  have h := sumN_eq_zero_point (fun q => if s.truck q = .onFerry f then 1 else 0)
+    w.trucks hz t ht
+  simp [he] at h
+
+theorem ride_occ_replace_eq (w : World) (s : State) (t f : Nat) (p : TruckPosition)
+    (same : (p = .onFerry f) ↔ (s.truck t = .onFerry f)) :
+    occupancy w {s with truck := setAt s.truck t p} f = occupancy w s f := by
+  unfold occupancy
+  apply sumN_congr
+  intro q _
+  by_cases he : q = t
+  · subst q
+    simp only [setAt,if_true,same]
+  · simp [setAt,he]
+
+theorem ride_credit_same (r : RideSpec w) {s u : State}
+    {A B : Nat → Fin (r.size+1)}
+    (ho : ∀ f, f < w.ferries → occupancy w s f = occupancy w u f)
+    (ha : ∀ f, f < w.ferries → A f = B f)
+    (hf : ∀ f, f < w.ferries → s.ferry f = u.ferry f) :
+    rideCredit r s A = rideCredit r u B := by
+  unfold rideCredit
+  apply sumN_congr
+  intro f h
+  simp [rideCreditAt,ho f h,ha f h,hf f h]
+
+theorem ride_credit_local (r : RideSpec w) {s u : State}
+    {A B : Nat → Fin (r.size+1)} (f absCost realCost : Nat)
+    (hf : f < w.ferries)
+    (other : ∀ g, g ≠ f → rideCreditAt r s A g = rideCreditAt r u B g)
+    (localCost : absCost + rideCreditAt r u B f ≤ realCost + rideCreditAt r s A f) :
+    absCost + rideCredit r u B ≤ realCost + rideCredit r s A := by
+  have h := stock_sum_replace_balance (rideCreditAt r s A) (rideCreditAt r u B)
+    f w.ferries hf other
+  change rideCredit r s A + rideCreditAt r u B f =
+    rideCredit r u B + rideCreditAt r s A f at h
+  omega
+
+def rideEmptyMove {n : Nat} (v : RideView w n) (f : Nat) (b : Fin (n+1)) :
+    RideView w n :=
+  {v with ferry := fun g => if g.val = f then b else v.ferry g}
+
+def rideFullMove {n : Nat} (v : RideView w n) (f t : Nat) (b : Fin (n+1))
+    (cargo : Nat → Bool) : RideView w n :=
+  {v with ferry := fun g => if g.val = f then b else v.ferry g,
+          truck := fun q => if q.val = t then b else v.truck q,
+          parcel := fun p => if cargo p.val then b else v.parcel p}
+
+-- Labeled view of the actual table. Counts/weak compositions and
+-- mixed-radix storage are refined separately; this is the semantic graph.
+structure RideTable (w : World) (r : RideSpec w) (C : Nat) where
+  value : RideView w r.size → Nat
+  empty : ∀ v f b, f < w.ferries → 0 < w.slots f →
+    value v ≤ 3 + value (rideEmptyMove v f b)
+  full : ∀ v f t b cargo (hf : f < w.ferries) (ht : t < w.trucks),
+    0 < w.slots f → v.truck ⟨t,ht⟩ = v.ferry ⟨f,hf⟩ →
+    (∀ p : Fin w.parcels, cargo p.val = true → v.parcel p = v.ferry ⟨f,hf⟩) →
+    sumN (fun p => if cargo p then w.weight p else 0) w.parcels ≤ C →
+    value v ≤ 5 + value (rideFullMove v f t b cargo)
+  goal : ∀ v, (∀ p : Fin w.parcels, v.parcel p = r.loc (w.goal p.val)) → value v = 0
+
+theorem ride_full_identity {n : Nat} (v : RideView w n) (f t : Nat)
+    (b : Fin (n+1)) (cargo : Nat → Bool)
+    (hf : ∀ g : Fin w.ferries, g.val = f → v.ferry g = b)
+    (ht : ∀ q : Fin w.trucks, q.val = t → v.truck q = b)
+    (hp : ∀ p : Fin w.parcels, cargo p.val = true → v.parcel p = b) :
+    rideFullMove v f t b cargo = v := by
+  apply ride_view_ext
+  · funext g
+    by_cases h : g.val = f
+    · simp [rideFullMove,h,hf g h]
+    · simp [rideFullMove,h]
+  · funext q
+    by_cases h : q.val = t
+    · simp [rideFullMove,h,ht q h]
+    · simp [rideFullMove,h]
+  · funext p
+    cases h : cargo p.val
+    · simp [rideFullMove,h]
+    · simp [rideFullMove,h,hp p h]
+
+theorem ride_initial_view (r : RideSpec w) (s : State) :
+    (∀ t : Fin w.trucks, (rideView r s (rideInitial r s)).truck t = r.loc (physicalTruck s t.val)) ∧
+    (∀ p : Fin w.parcels, (rideView r s (rideInitial r s)).parcel p = r.loc (physicalParcel s p.val)) := by
+  have ht : ∀ t, rideTruck r s (rideInitial r s) t = r.loc (physicalTruck s t) := by
+    intro t
+    cases h : s.truck t <;> simp [rideTruck,rideInitial,physicalTruck,h]
+  exact ⟨fun t => ht t.val,fun p => by
+    cases h : s.parcel p.val <;> simp [rideView,rideParcel,physicalParcel,h,ht]⟩
+
+theorem ride_initial_credit (r : RideSpec w) (s : State)
+    (v : CarrierInvariant w s) :
+    rideCredit r s (rideInitial r s) =
+      sumN (fun t => match s.truck t with | .land _ => 0 | .onFerry _ => 1) w.trucks := by
+  have eq : rideCredit r s (rideInitial r s) = sumN (occupancy w s) w.ferries := by
+    unfold rideCredit
+    apply sumN_congr
+    intro f hf
+    have hb : occupancy w s f ≤ 1 := Nat.le_trans (v.occupancy f hf) (r.oneSlot f hf)
+    by_cases hz : occupancy w s f = 0
+    · simp [rideCreditAt,hz]
+    · have he : occupancy w s f = 1 := by omega
+      simp [rideCreditAt,rideInitial,he]
+  rw [eq]
+  unfold occupancy
+  rw [sumN_swap]
+  apply sumN_congr
+  intro t ht
+  cases h : s.truck t with
+  | land a =>
+    have he : sumN (fun f => if TruckPosition.land a = .onFerry f then 1 else 0) w.ferries = 0 := by
+      simp [sumN_zero]
+    simpa [h] using he
+  | onFerry f =>
+    have hf := (v.trucks t ht f h).1
+    have he := sumN_single (fun g => if TruckPosition.onFerry f = .onFerry g then 1 else 0)
+      w.ferries f hf (by intro q hq hn; simp [Ne.symm hn])
+    simpa [h] using he
+
+#print axioms ride_initial_view
+#print axioms ride_initial_credit
+#print axioms ride_credit_local
+#print axioms ride_occ_replace_eq
+
+end IslandLogistics
