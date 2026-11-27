@@ -10199,3 +10199,212 @@ theorem hub_actual_simple_path (w : World) (g : HubGraphCertificate w)
 #print axioms hub_actual_simple_path
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Each completed ride from a to b, a≠b, must pay once at its departure
+-- port and once at its arrival port. Credits are per truck (not per
+-- ferry), allowing many passengers with different anchors.
+def effectivePortCredit (out : Bool) (f port : Nat)
+    (s : State) (A : Nat → Nat) (t : Nat) : Nat :=
+  if s.truck t = .onFerry f ∧ A t ≠ s.ferry f ∧
+    (if out then A t = port else s.ferry f = port) then 1 else 0
+
+def effectivePortSpend (out : Bool) (f port : Nat)
+    (s : State) (A : Nat → Nat) (act : ActionLabel) (t : Nat) : Nat :=
+  match act with
+  | .disembark q g => if q = t ∧ g = f then effectivePortCredit out f port s A t else 0
+  | _ => 0
+
+def effectivePortMint (out : Bool) (f port : Nat)
+    (s : State) (act : ActionLabel) (t : Nat) : Nat :=
+  match act with
+  | .sail g b => if g = f ∧ s.truck t = .onFerry f ∧
+      (if out then s.ferry f = port else b = port) then 1 else 0
+  | _ => 0
+
+theorem effective_port_local (w : World) {s u : State} {act : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u act m h) (out : Bool) (f port t : Nat)
+    (A : Nat → Nat) :
+    effectivePortSpend out f port s A act t +
+      effectivePortCredit out f port u (effectiveNext A act) t ≤
+    effectivePortMint out f port s act t + effectivePortCredit out f port s A t := by
+  cases st with
+  | drive q a b hq hr hv =>
+    by_cases he : t = q
+    · subst t
+      simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hq]
+    · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,he]
+  | board q g a hq hg hr room hv =>
+    by_cases he : t = q
+    · subst t
+      by_cases hgf : g = f
+      · subst g
+        simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hq,hg]
+      · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hq,hgf]
+    · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,he]
+  | disembark q g hq hv =>
+    by_cases he : t = q
+    · subst t
+      by_cases hgf : g = f
+      · subst g
+        simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hq]
+      · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hq,hgf]
+    · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,he,Ne.symm he]
+  | sail g b hr hn hv =>
+    by_cases hgf : g = f
+    · subst g
+      by_cases hpass : s.truck t = .onFerry f
+      · cases out with
+        | false =>
+          by_cases hb : b = port <;>
+            simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hpass,hb] <;>
+            split <;> omega
+        | true =>
+          by_cases hA : A t = port
+          · by_cases hfrom : s.ferry f = port
+            · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hpass,hA,hfrom]
+              split <;> omega
+            · have hdiff : A t ≠ s.ferry f := by omega
+              simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hpass,hA,hfrom,hdiff]
+              split <;> omega
+          · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hpass,hA]
+      · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,hpass]
+    · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hgf,Ne.symm hgf]
+  | load q t' a hq ht room hv => simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext]
+  | unload q t' a hq ht hv => simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext]
+
+def portCreditSum (w : World) (out : Bool) (f port : Nat)
+    (s : State) (A : Nat → Nat) : Nat :=
+  sumN (effectivePortCredit out f port s A) w.trucks
+
+def portSpendSum (w : World) (out : Bool) (f port : Nat)
+    (s : State) (A : Nat → Nat) (act : ActionLabel) : Nat :=
+  sumN (effectivePortSpend out f port s A act) w.trucks
+
+def portSailAllowance (w : World) (out : Bool) (f port : Nat)
+    (s : State) (act : ActionLabel) : Nat :=
+  match act with
+  | .sail g b => if g = f ∧ (if out then s.ferry f = port else b = port)
+      then w.slots f else 0
+  | _ => 0
+
+theorem effective_mint_bound (w : World) {s u : State} {act : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u act m h) (v : ValidFerryOccupancy w s)
+    (out : Bool) (f port : Nat) :
+    sumN (effectivePortMint out f port s act) w.trucks ≤
+      portSailAllowance w out f port s act := by
+  cases st with
+  | sail g b hr hn hv =>
+    by_cases he : g = f ∧ (if out then s.ferry f = port else b = port)
+    · have hm : sumN (effectivePortMint out f port s (.sail g b)) w.trucks =
+          occupancy w s f := by
+        unfold occupancy
+        apply sumN_congr
+        intro t ht
+        simp [effectivePortMint,he.1,he.2]
+      rw [hm]
+      have hf : f < w.ferries := by omega
+      simpa [portSailAllowance,he] using v f hf
+    · have hz : sumN (effectivePortMint out f port s (.sail g b)) w.trucks = 0 := by
+        rw [sumN_congr _ (fun _ => 0) _ (by
+          intro t ht
+          have hh : ¬ (g = f ∧ s.truck t = .onFerry f ∧
+              (if out then s.ferry f = port else b = port)) := by
+            intro hh
+            exact he ⟨hh.1,hh.2.2⟩
+          simp only [effectivePortMint,if_neg hh]),sumN_zero]
+      rw [hz]
+      exact Nat.zero_le _
+  | drive => simp [effectivePortMint,portSailAllowance,sumN_zero]
+  | board => simp [effectivePortMint,portSailAllowance,sumN_zero]
+  | disembark => simp [effectivePortMint,portSailAllowance,sumN_zero]
+  | load => simp [effectivePortMint,portSailAllowance,sumN_zero]
+  | unload => simp [effectivePortMint,portSailAllowance,sumN_zero]
+
+theorem effective_port_step_budget (w : World) {s u : State} {act : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u act m h) (v : ValidFerryOccupancy w s)
+    (out : Bool) (f port : Nat) (A : Nat → Nat) :
+    portSpendSum w out f port s A act +
+      portCreditSum w out f port u (effectiveNext A act) ≤
+    portSailAllowance w out f port s act + portCreditSum w out f port s A := by
+  have hs := sumN_mono
+    (fun t => effectivePortSpend out f port s A act t +
+      effectivePortCredit out f port u (effectiveNext A act) t)
+    (fun t => effectivePortMint out f port s act t +
+      effectivePortCredit out f port s A t) w.trucks
+    (fun t _ => effective_port_local w st out f port t A)
+  rw [sumN_add,sumN_add] at hs
+  have hb := effective_mint_bound w st v out f port
+  unfold portSpendSum portCreditSum
+  omega
+
+theorem effective_port_initial_zero (w : World) (out : Bool) (f port : Nat) (s : State) :
+    portCreditSum w out f port s (physicalTruck s) = 0 := by
+  unfold portCreditSum
+  rw [sumN_congr _ (fun _ => 0) _ (by
+    intro t ht
+    by_cases he : s.truck t = .onFerry f
+    · simp [effectivePortCredit,physicalTruck,he]
+    · simp [effectivePortCredit,he]),sumN_zero]
+
+-- Record the actual labels and anchors; no independent per-port choice
+-- of a path is made. Every port budget refers to this SAME legal trace.
+structure EffectiveEvent where
+  source : State
+  anchor : Nat → Nat
+  action : ActionLabel
+
+inductive EffectiveTrace (w : World) :
+    State → (Nat → Nat) → State → (Nat → Nat) → List EffectiveEvent → Nat → Nat → Prop where
+  | nil (s : State) (A : Nat → Nat) : EffectiveTrace w s A s A [] 0 0
+  | cons {s t u : State} {A B : Nat → Nat} {act : ActionLabel}
+      {xs : List EffectiveEvent} {a b m h : Nat} :
+      LabelStep w s t act a b →
+      EffectiveTrace w t (effectiveNext A act) u B xs m h →
+      EffectiveTrace w s A u B (⟨s,A,act⟩::xs) (a+m) (b+h)
+
+theorem effective_trace_exists (w : World)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) (A : Nat → Nat) :
+    ∃ B xs, EffectiveTrace w s A u B xs m h := by
+  induction tr generalizing A with
+  | nil s => exact ⟨A,[],EffectiveTrace.nil s A⟩
+  | cons st tail ih =>
+    obtain ⟨act,lab⟩ := label_step_complete w st
+    obtain ⟨B,xs,ht⟩ := ih (effectiveNext A act)
+    exact ⟨B,_,EffectiveTrace.cons lab ht⟩
+
+theorem effective_trace_port_budget (w : World)
+    {s u : State} {A B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s A u B xs m h) (v : CarrierInvariant w s)
+    (out : Bool) (f port : Nat) :
+    (xs.map (fun e => portSpendSum w out f port e.source e.anchor e.action)).sum +
+      portCreditSum w out f port u B ≤
+    (xs.map (fun e => portSailAllowance w out f port e.source e.action)).sum +
+      portCreditSum w out f port s A := by
+  induction tr with
+  | nil s A => simp
+  | @cons s t u A B act xs a b m h st rest ih =>
+    have h1 := effective_port_step_budget w st v.occupancy out f port A
+    have h2 := ih (step_carrier_invariant w (label_step_sound w st) v)
+    simp only [List.map_cons,List.sum_cons]
+    omega
+
+theorem effective_completed_port_budget (w : World)
+    {s u : State} {B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s (physicalTruck s) u B xs m h)
+    (v : CarrierInvariant w s) (out : Bool) (f port : Nat) :
+    (xs.map (fun e => portSpendSum w out f port e.source e.anchor e.action)).sum ≤
+    (xs.map (fun e => portSailAllowance w out f port e.source e.action)).sum := by
+  have h := effective_trace_port_budget w tr v out f port
+  rw [effective_port_initial_zero] at h
+  omega
+
+#print axioms effective_port_local
+#print axioms effective_mint_bound
+#print axioms effective_port_step_budget
+#print axioms effective_trace_exists
+#print axioms effective_completed_port_budget
+
+end IslandLogistics
