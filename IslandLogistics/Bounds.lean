@@ -8789,7 +8789,9 @@ theorem ride_table_step (r : RideSpec w) (C : Nat) (tab : RideTable w r C)
       (fun f _ => (ho f).symm) (by intros; rfl) (by intros; rfl)
     refine ⟨A,?_,?_⟩
     · intro f hf hz
-      exact anch f hf (by simpa [ho f] using hz)
+      change occupancy w u f = 0 at hz
+      rw [ho f] at hz
+      exact anch f hf hz
     · change tab.value (rideView r s A) + rideCredit r u A ≤
         serviceCount (.drive t a b) + 3*sailCount (.drive t a b) +
           tab.value (rideView r u A) + rideCredit r s A
@@ -8825,7 +8827,9 @@ theorem ride_table_step (r : RideSpec w) (C : Nat) (tab : RideTable w r C)
       · subst g
         change occupancy w u f = 0 at hzero
         omega
-      · exact anch g hg (by simpa [ho g he] using hzero)
+      · change occupancy w u g = 0 at hzero
+        rw [ho g he] at hzero
+        exact anch g hg hzero
     · change tab.value (rideView r s A) + rideCredit r u A ≤
         serviceCount (.board t f a) + 3*sailCount (.board t f a) +
           tab.value (rideView r u A) + rideCredit r s A
@@ -9045,7 +9049,7 @@ theorem ride_table_trace (r : RideSpec w) (C : Nat) (tab : RideTable w r C)
     ∃ B, RideAnchored r u B ∧
       tab.value (rideView r s A) + rideCredit r u B ≤
         x+3*f+tab.value (rideView r u B)+rideCredit r s A := by
-  induction counts with
+  induction counts generalizing A with
   | nil s => exact ⟨A,anch,by omega⟩
   | @cons s u' u a b m h st tail act d x f lab rest ih =>
     obtain ⟨B,hB,h1⟩ := ride_table_step r C tab cap lab v A anch
@@ -9064,7 +9068,7 @@ theorem stock_ride_admissible (r : RideSpec w) (C : Nat) (tab : RideTable w r C)
     (counts : TraceCounts w tr d x f) (v : CarrierInvariant w s) (done : Goal w u) :
     rideEstimate r C tab s ≤ x+3*f := by
   obtain ⟨B,_,hb⟩ := ride_table_trace r C tab cap counts v (rideInitial r s)
-    (by intros; rfl)
+    (by unfold RideAnchored; intro f hf hz; rfl)
   have hg : tab.value (rideView r u B) = 0 := by
     apply tab.goal
     intro p
