@@ -10267,7 +10267,7 @@ theorem effective_port_local (w : World) {s u : State} {act : ActionLabel} {m h 
             · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hpass,hA,hfrom]
               split <;> omega
             · have hdiff : A t ≠ s.ferry f := by omega
-              simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hpass,hA,hfrom,hdiff]
+              simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hpass,hA,hfrom,Ne.symm hfrom,hdiff]
               split <;> omega
           · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hpass,hA]
       · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,hpass]
@@ -10317,11 +10317,21 @@ theorem effective_mint_bound (w : World) {s u : State} {act : ActionLabel} {m h 
           simp only [effectivePortMint,if_neg hh]),sumN_zero]
       rw [hz]
       exact Nat.zero_le _
-  | drive => simp [effectivePortMint,portSailAllowance,sumN_zero]
-  | board => simp [effectivePortMint,portSailAllowance,sumN_zero]
-  | disembark => simp [effectivePortMint,portSailAllowance,sumN_zero]
-  | load => simp [effectivePortMint,portSailAllowance,sumN_zero]
-  | unload => simp [effectivePortMint,portSailAllowance,sumN_zero]
+  | drive =>
+    change sumN (fun _ => 0) w.trucks ≤ 0
+    rw [sumN_zero]
+  | board =>
+    change sumN (fun _ => 0) w.trucks ≤ 0
+    rw [sumN_zero]
+  | disembark =>
+    change sumN (fun _ => 0) w.trucks ≤ 0
+    rw [sumN_zero]
+  | load =>
+    change sumN (fun _ => 0) w.trucks ≤ 0
+    rw [sumN_zero]
+  | unload =>
+    change sumN (fun _ => 0) w.trucks ≤ 0
+    rw [sumN_zero]
 
 theorem effective_port_step_budget (w : World) {s u : State} {act : ActionLabel} {m h : Nat}
     (st : LabelStep w s u act m h) (v : ValidFerryOccupancy w s)
