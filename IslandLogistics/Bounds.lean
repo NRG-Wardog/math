@@ -9930,7 +9930,7 @@ theorem key_cache_evict {S K V : Type} (key : S → K) (eval : S → V)
 theorem key_factors_projection {S K V : Type} (key : S → K) (f : K → V) :
     KeyFactors key (fun s => f (key s)) := by
   intro s t he
-  rw [he]
+  exact congrArg f he
 
 -- The distinction between an admissible evaluator and safe pruning:
 -- d is the true remaining cost on the solvable quotient.  Each expanded
