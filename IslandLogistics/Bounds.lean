@@ -8372,3 +8372,178 @@ theorem admissible_max_complete (w : World) (init : State) (h k : State → Nat)
 #print axioms admissible_max_complete
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- A parcel already delivered may be frozen at its actual goal. Removing
+-- future movements of that parcel cannot consume any vehicle capacity.
+def freezeDelivered (w : World) (s : State) (p : Nat) : State :=
+  {s with parcel := setAt s.parcel p (.ground (w.goal p))}
+
+theorem freeze_setAt_shadow {α : Type} (f : Nat → α) (p : Nat) (x y : α) :
+    setAt (setAt f p x) p y = setAt f p y := by
+  funext i
+  by_cases he : i = p <;> simp [setAt,he]
+
+theorem freeze_setAt_swap {α : Type} (f : Nat → α) (p q : Nat)
+    (x y : α) (hne : q ≠ p) :
+    setAt (setAt f q x) p y = setAt (setAt f p y) q x := by
+  funext i
+  by_cases hp : i = p
+  · subst i
+    simp [setAt,Ne.symm hne]
+  · by_cases hq : i = q <;> simp [setAt,hp,hq,hne]
+
+theorem freeze_overwrite (w : World) (s : State) (p : Nat) (v : ParcelPosition) :
+    freezeDelivered w {s with parcel := setAt s.parcel p v} p =
+      freezeDelivered w s p := by
+  change {s with parcel := setAt (setAt s.parcel p v) p (.ground (w.goal p))} =
+    {s with parcel := setAt s.parcel p (.ground (w.goal p))}
+  rw [freeze_setAt_shadow]
+
+theorem freeze_other_update (w : World) (s : State) (p q : Nat)
+    (v : ParcelPosition) (hne : q ≠ p) :
+    freezeDelivered w {s with parcel := setAt s.parcel q v} p =
+      {freezeDelivered w s p with parcel := setAt (freezeDelivered w s p).parcel q v} := by
+  change {s with parcel := setAt (setAt s.parcel q v) p (.ground (w.goal p))} =
+    {s with parcel := setAt (setAt s.parcel p (.ground (w.goal p))) q v}
+  rw [freeze_setAt_swap s.parcel p q v (.ground (w.goal p)) hne]
+
+theorem freeze_other_position (w : World) (s : State) (p q : Nat) (hne : q ≠ p) :
+    (freezeDelivered w s p).parcel q = s.parcel q := by
+  simp [freezeDelivered,setAt,hne]
+
+theorem freeze_load_le (w : World) (s : State) (p t : Nat) :
+    load w (freezeDelivered w s p) t ≤ load w s t := by
+  unfold load
+  apply sumN_mono
+  intro q _
+  by_cases he : q = p
+  · subst q
+    simp [freezeDelivered,setAt]
+  · rw [freeze_other_position w s p q he]
+
+theorem freeze_goal (w : World) (s : State) (p : Nat) (g : Goal w s) :
+    Goal w (freezeDelivered w s p) := by
+  intro q hq
+  by_cases he : q = p
+  · subst q
+    simp [freezeDelivered,setAt]
+  · rw [freeze_other_position w s p q he]
+    exact g q hq
+
+theorem freeze_delivered_identity (w : World) (s : State) (p : Nat)
+    (hp : s.parcel p = .ground (w.goal p)) :
+    freezeDelivered w s p = s := by
+  unfold freezeDelivered
+  rw [← hp,setAt_current]
+
+-- This relation explicitly forbids every move of the frozen parcel;
+-- merely constructing an arbitrary legal suffix would not suffice.
+def ParcelFixedStep (w : World) (p : Nat) (s u : State) (m h : Nat) : Prop :=
+  Step w s u m h ∧ s.parcel p = u.parcel p
+
+theorem freeze_step_replay (w : World) (p : Nat)
+    {s u : State} {m h : Nat} (st : Step w s u m h) :
+    (freezeDelivered w u p = freezeDelivered w s p ∧ m = 0 ∧ h = 1) ∨
+    (Step w (freezeDelivered w s p) (freezeDelivered w u p) m h ∧
+      s.parcel p = u.parcel p) := by
+  cases st with
+  | drive t a b ht hr hv =>
+    exact Or.inr ⟨Step.drive (freezeDelivered w s p) t a b ht hr hv,rfl⟩
+  | board t f a ht hf hr room hv =>
+    exact Or.inr ⟨Step.board (freezeDelivered w s p) t f a ht hf hr room hv,rfl⟩
+  | disembark t f ht hv =>
+    exact Or.inr ⟨Step.disembark (freezeDelivered w s p) t f ht hv,rfl⟩
+  | sail f b hr hn hv =>
+    exact Or.inr ⟨Step.sail (freezeDelivered w s p) f b hr hn hv,rfl⟩
+  | load q t a hq ht room hv =>
+    by_cases he : q = p
+    · subst q
+      exact Or.inl ⟨freeze_overwrite w s p (.onTruck t),rfl,rfl⟩
+    · right
+      constructor
+      · rw [freeze_other_update w s p q (.onTruck t) he]
+        have hp' := (freeze_other_position w s p q he).trans hq
+        have hb := freeze_load_le w s p t
+        have room' : load w (freezeDelivered w s p) t + w.weight q ≤ w.capacity t := by omega
+        exact Step.load (freezeDelivered w s p) q t a hp' ht room' hv
+      · simp [setAt,Ne.symm he]
+  | unload q t a hq ht hv =>
+    by_cases he : q = p
+    · subst q
+      exact Or.inl ⟨freeze_overwrite w s p (.ground a),rfl,rfl⟩
+    · right
+      constructor
+      · rw [freeze_other_update w s p q (.ground a) he]
+        have hp' := (freeze_other_position w s p q he).trans hq
+        exact Step.unload (freezeDelivered w s p) q t a hp' ht hv
+      · simp [setAt,Ne.symm he]
+
+-- Delete the handling operations of p, retaining all other actions and
+-- their movement cost. If the endpoints differ for p, at least one
+-- handling operation was removed. This is a path theorem, not an A* claim.
+theorem freeze_path_replay (w : World) (p : Nat)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h) :
+    ∃ h', Path (ParcelFixedStep w p) (freezeDelivered w s p) (freezeDelivered w u p) m h' ∧
+      h' ≤ h ∧ (s.parcel p ≠ u.parcel p → h'+1 ≤ h) := by
+  induction path with
+  | nil s =>
+    exact ⟨0,Path.nil _,Nat.le_refl _,by intro hn; exact False.elim (hn rfl)⟩
+  | @cons s t u a b m h st rest ih =>
+    obtain ⟨h',pp,hb,hs⟩ := ih
+    rcases freeze_step_replay w p st with ⟨eq,ha,hc⟩ | ⟨step,pres⟩
+    · subst a
+      subst b
+      rw [eq] at pp
+      refine ⟨h',?_,by omega,?_⟩
+      · simpa using pp
+      · intro _
+        omega
+    · have hold : (freezeDelivered w s p).parcel p = (freezeDelivered w t p).parcel p := by
+        simp [freezeDelivered,setAt]
+      refine ⟨b+h',Path.cons ⟨step,hold⟩ pp,by omega,?_⟩
+      intro hn
+      have hn' : t.parcel p ≠ u.parcel p := by
+        intro he
+        exact hn (pres.trans he)
+      have ht := hs hn'
+      omega
+
+-- Pruning future reloads of any already delivered parcel preserves
+-- a no-more-expensive path to the identical terminal state.
+theorem delivered_parcel_can_remain (w : World) (p : Nat)
+    {s u : State} {m h : Nat} (hp : p < w.parcels)
+    (delivered : s.parcel p = .ground (w.goal p))
+    (path : Path (Step w) s u m h) (done : Goal w u) :
+    ∃ h', h' ≤ h ∧ Path (ParcelFixedStep w p) s u m h' := by
+  obtain ⟨h',pp,hb,_⟩ := freeze_path_replay w p path
+  rw [freeze_delivered_identity w s p delivered,
+    freeze_delivered_identity w u p (done p hp)] at pp
+  exact ⟨h',hb,pp⟩
+
+-- Forced final delivery: from EVERY legal completion, construct a
+-- no-more-expensive one whose FIRST action is this particular unload.
+-- The remaining path never moves p again.
+theorem advance_final_delivery (w : World) (p t : Nat)
+    {s u : State} {m h : Nat}
+    (hp : s.parcel p = .onTruck t) (ht : s.truck t = .land (w.goal p))
+    (hv : p < w.parcels ∧ t < w.trucks ∧ w.goal p < w.locations)
+    (path : Path (Step w) s u m h) (done : Goal w u) :
+    ∃ h', 1+h' ≤ h ∧
+      Step w s (freezeDelivered w s p) 0 1 ∧
+      Path (ParcelFixedStep w p) (freezeDelivered w s p) u m h' := by
+  obtain ⟨h',pp,_,hs⟩ := freeze_path_replay w p path
+  have hn : s.parcel p ≠ u.parcel p := by simp [hp,done p hv.1]
+  have hb := hs hn
+  rw [freeze_delivered_identity w u p (done p hv.1)] at pp
+  exact ⟨h',by omega,Step.unload s p t (w.goal p) hp ht hv,pp⟩
+
+#print axioms freeze_load_le
+#print axioms freeze_step_replay
+#print axioms freeze_path_replay
+#print axioms delivered_parcel_can_remain
+#print axioms advance_final_delivery
+
+end IslandLogistics
