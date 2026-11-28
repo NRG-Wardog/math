@@ -11613,3 +11613,172 @@ theorem evaluator_branch_path (w : World) {s u : State} {m h e : Nat}
 #print axioms evaluator_branch_path
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Full-ferry priority: every legal completion of a state with a full
+-- ferry and a loaded passenger can start with a SAIL or DISEMBARK of
+-- that ferry, without changing the completion cost or terminal state.
+theorem other_passenger_iff (w : World) (f t : Nat) {s u : State} {m h : Nat}
+    (st : OtherStep w f s u m h) :
+    u.truck t = .onFerry f ↔ s.truck t = .onFerry f := by
+  cases st with
+  | drive q a b hq hr hv =>
+    by_cases he : t=q
+    · subst t; simp [setAt,hq]
+    · simp [setAt,he]
+  | board q g a diff hq hg hr room hv =>
+    by_cases he : t=q
+    · subst t; simp [setAt,hq,diff]
+    · simp [setAt,he]
+  | disembark q g diff hq hv =>
+    by_cases he : t=q
+    · subst t; simp [setAt,hq,diff]
+    · simp [setAt,he]
+  | sail => rfl
+  | load => rfl
+  | unload => rfl
+
+theorem other_occupancy_same (w : World) (f : Nat) {s u : State} {m h : Nat}
+    (st : OtherStep w f s u m h) : occupancy w u f = occupancy w s f := by
+  unfold occupancy
+  apply sumN_congr
+  intro t _
+  simp only [other_passenger_iff w f t st]
+
+theorem other_aboard_cargo (w : World) (f t p : Nat) {s u : State} {m h : Nat}
+    (st : OtherStep w f s u m h) (ht : s.truck t = .onFerry f)
+    (hp : s.parcel p = .onTruck t) : u.parcel p = .onTruck t := by
+  cases st with
+  | load q v a hq hv room valid =>
+    have hn : p ≠ q := by intro he; subst q; rw [hp] at hq; cases hq
+    simp [setAt,hn,hp]
+  | unload q v a hq hv valid =>
+    have hn : p ≠ q := by
+      intro he; subst q
+      have htv : t=v := by simpa [hp] using hq
+      subst v
+      rw [ht] at hv
+      cases hv
+    simp [setAt,hn,hp]
+  | drive => exact hp
+  | board => exact hp
+  | disembark => exact hp
+  | sail => exact hp
+
+def earlyLeave (s : State) (t f : Nat) : State :=
+  {s with truck := setAt s.truck t (.land (s.ferry f))}
+
+theorem other_early_leave (w : World) (f t : Nat) {s u : State} {m h : Nat}
+    (st : OtherStep w f s u m h) (ht : s.truck t = .onFerry f) :
+    OtherStep w f (earlyLeave s t f) (earlyLeave u t f) m h := by
+  cases st with
+  | drive q a b hq hr hv =>
+    have hn : q ≠ t := by intro he; subst q; rw [ht] at hq; cases hq
+    have hq' : (earlyLeave s t f).truck q = .land a := by simp [earlyLeave,setAt,hn,hq]
+    have step := OtherStep.drive (w := w) (f := f) (earlyLeave s t f) q a b hq' hr hv
+    have eq := freeze_setAt_swap s.truck t q (.land b) (.land (s.ferry f)) hn
+    simpa only [earlyLeave,eq] using step
+  | board q g a diff hq hg hr room hv =>
+    have hn : q ≠ t := by intro he; subst q; rw [ht] at hq; cases hq
+    have hq' : (earlyLeave s t f).truck q = .land a := by simp [earlyLeave,setAt,hn,hq]
+    have hocc : occupancy w (earlyLeave s t f) g = occupancy w s g :=
+      ride_occ_replace_eq w s t g _ (by simp [ht,Ne.symm diff])
+    have step := OtherStep.board (w := w) (f := f) (earlyLeave s t f) q g a diff
+      hq' hg hr (by rw [hocc]; exact room) hv
+    have eq := freeze_setAt_swap s.truck t q (.onFerry g) (.land (s.ferry f)) hn
+    simpa only [earlyLeave,eq] using step
+  | disembark q g diff hq hv =>
+    have hn : q ≠ t := by
+      intro he; subst q
+      rw [ht] at hq
+      have heq : f=g := by simpa using hq
+      exact diff heq.symm
+    have hq' : (earlyLeave s t f).truck q = .onFerry g := by simp [earlyLeave,setAt,hn,hq]
+    have step := OtherStep.disembark (w := w) (f := f) (earlyLeave s t f) q g diff hq' hv
+    have eq := freeze_setAt_swap s.truck t q (.land (s.ferry g)) (.land (s.ferry f)) hn
+    simpa only [earlyLeave,eq] using step
+  | sail g b diff hr hne hv =>
+    have step := OtherStep.sail (w := w) (f := f) (earlyLeave s t f) g b diff hr hne hv
+    simpa [earlyLeave,sailAt,setAt,Ne.symm diff] using step
+  | load p q a hp hq room hv =>
+    have hn : q ≠ t := by intro he; subst q; rw [ht] at hq; cases hq
+    have hq' : (earlyLeave s t f).truck q = .land a := by simp [earlyLeave,setAt,hn,hq]
+    exact OtherStep.load _ p q a hp hq' room hv
+  | unload p q a hp hq hv =>
+    have hn : q ≠ t := by intro he; subst q; rw [ht] at hq; cases hq
+    have hq' : (earlyLeave s t f).truck q = .land a := by simp [earlyLeave,setAt,hn,hq]
+    exact OtherStep.unload _ p q a hp hq' hv
+
+inductive FerryProgress (w : World) (f : Nat) : State → State → Nat → Prop where
+  | sail (s : State) (b : Nat) : w.route f b → s.ferry f ≠ b →
+      f < w.ferries ∧ b < w.locations → FerryProgress w f s (sailAt s f b) 3
+  | leave (s : State) (t : Nat) : s.truck t = .onFerry f →
+      t < w.trucks ∧ f < w.ferries → FerryProgress w f s (earlyLeave s t f) 1
+
+theorem ferry_progress_legal (w : World) (f : Nat) {s u : State} {c : Nat}
+    (p : FerryProgress w f s u c) : Step w s u c 0 := by
+  cases p with
+  | sail s b hr hn hv => exact Step.sail s f b hr hn hv
+  | leave s t ht hv => exact Step.disembark s t f ht hv
+
+theorem ferry_full_classify (w : World) (f : Nat) {s u : State} {m h : Nat}
+    (st : Step w s u m h) (full : occupancy w s f = w.slots f) :
+    OtherStep w f s u m h ∨ (h=0 ∧ FerryProgress w f s u m) := by
+  cases st with
+  | drive t a b ht hr hv => exact Or.inl (OtherStep.drive s t a b ht hr hv)
+  | board t g a ht hg hr room hv =>
+    by_cases he : g=f
+    · subst g; omega
+    · exact Or.inl (OtherStep.board s t g a he ht hg hr room hv)
+  | disembark t g ht hv =>
+    by_cases he : g=f
+    · subst g; exact Or.inr ⟨rfl,FerryProgress.leave s t ht hv⟩
+    · exact Or.inl (OtherStep.disembark s t g he ht hv)
+  | sail g b hr hn hv =>
+    by_cases he : g=f
+    · subst g; exact Or.inr ⟨rfl,FerryProgress.sail s b hr hn hv⟩
+    · exact Or.inl (OtherStep.sail s g b he hr hn hv)
+  | load p t a hp ht room hv => exact Or.inl (OtherStep.load s p t a hp ht room hv)
+  | unload p t a hp ht hv => exact Or.inl (OtherStep.unload s p t a hp ht hv)
+
+theorem advance_ferry_progress (w : World) (f : Nat) {s u v : State}
+    {m h c : Nat} (other : OtherStep w f s u m h) (progress : FerryProgress w f u v c) :
+    ∃ z, FerryProgress w f s z c ∧ OtherStep w f z v m h := by
+  cases progress with
+  | sail u b hr hn hv =>
+    have hs : s.ferry f ≠ b := by
+      rw [← other_preserves_ferry w f other]
+      exact hn
+    exact ⟨sailAt s f b,FerryProgress.sail s b hr hs hv,other_commutes w f b other⟩
+  | leave u t ht hv =>
+    have hs := (other_passenger_iff w f t other).mp ht
+    exact ⟨earlyLeave s t f,FerryProgress.leave s t hs hv,other_early_leave w f t other hs⟩
+
+theorem full_loaded_ferry_priority (w : World) (f t p : Nat)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h) (done : Goal w u)
+    (valid : p < w.parcels) (full : occupancy w s f = w.slots f)
+    (ht : s.truck t = .onFerry f) (hp : s.parcel p = .onTruck t) :
+    ∃ z c d, FerryProgress w f s z c ∧ Path (Step w) z u d h ∧ m=c+d := by
+  induction path with
+  | nil s =>
+    have hg := done p valid
+    rw [hp] at hg
+    cases hg
+  | @cons s v u a b m h st tail ih =>
+    rcases ferry_full_classify w f st full with other | ⟨hb,progress⟩
+    · have hf := (other_occupancy_same w f other).trans full
+      have ht' := (other_passenger_iff w f t other).mpr ht
+      have hp' := other_aboard_cargo w f t p other ht hp
+      obtain ⟨z,c,d,hprog,hpath,hm⟩ := ih hf ht' hp'
+      obtain ⟨z',hprog',ho⟩ := advance_ferry_progress w f other hprog
+      exact ⟨z',c,a+d,hprog',Path.cons (other_is_step w f ho) hpath,by omega⟩
+    · subst b
+      exact ⟨v,a,m,progress,by simpa using tail,by omega⟩
+
+#print axioms other_early_leave
+#print axioms advance_ferry_progress
+#print axioms full_loaded_ferry_priority
+
+end IslandLogistics
