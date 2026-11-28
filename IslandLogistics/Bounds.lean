@@ -11883,6 +11883,7 @@ theorem fleet_port_stock_le (w : World) (fleet : Nat → Bool) (s : State) (port
   apply sumN_mono
   intro f hf
   cases he : fleet f <;> simp [he]
+  split <;> omega
 
 theorem fleet_port_stock_step (w : World) (fleet : Nat → Bool) (port : Nat)
     {s u : State} {act : ActionLabel} {m h : Nat}
@@ -11943,7 +11944,7 @@ theorem hub_port_actual_budget (w : World) (fleet : Nat → Bool) (k : Nat)
   let arrive := (xs.map (fun e => fleetPortSail fleet false port e.source e.action)).sum
   let outTrips := (xs.map (fleetPortSpent w fleet true port)).sum
   let inTrips := (xs.map (fleetPortSpent w fleet false port)).sum
-  have t : HubPortTrace p k (fleetBoatCount w fleet) :=
+  let t : HubPortTrace p k (fleetBoatCount w fleet) :=
     {depart := depart, arrive := arrive, finish := fleetPortStock w fleet u port,
      tripsOut := outTrips, tripsIn := inTrips, binOut := ho, binIn := hi,
      sailOut := by
@@ -11959,7 +11960,7 @@ theorem hub_port_actual_budget (w : World) (fleet : Nat → Bool) (k : Nat)
        change depart+fleetPortStock w fleet u port = arrive+fleetPortStock w fleet s port
        unfold depart arrive
        omega}
-  exact hub_port_inventory_bound p k (fleetBoatCount w fleet) positive t
+  simpa only [t,p,depart,arrive] using hub_port_inventory_bound p k (fleetBoatCount w fleet) positive t
 
 #print axioms fleet_completed_port_budget
 #print axioms fleet_port_stock_trace
