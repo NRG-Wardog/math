@@ -8058,7 +8058,7 @@ theorem sail_table_step (r : SailSpec w) (C : Nat) (seed : BinState)
         intro q hq hk
         by_cases h : q = p
         · subst q; simp [physicalParcel,physicalTruck,setAt,hp,ht]
-        · simp [physicalParcel,setAt,h])
+        · simp [physicalParcel,physicalTruck,setAt,h])
     rw [← he]; simp [sailCount]
   | unload p t a hp ht hv =>
     have he := sail_view_congr r (s := s) (u := {s with parcel := setAt s.parcel p (.ground a)})
@@ -8066,7 +8066,7 @@ theorem sail_table_step (r : SailSpec w) (C : Nat) (seed : BinState)
         intro q hq hk
         by_cases h : q = p
         · subst q; simp [physicalParcel,physicalTruck,setAt,hp,ht]
-        · simp [physicalParcel,setAt,h])
+        · simp [physicalParcel,physicalTruck,setAt,h])
     rw [← he]; simp [sailCount]
 
 theorem sailing_trace_budget (r : SailSpec w) (C : Nat) (seed : BinState)
@@ -8096,4 +8096,4021 @@ theorem sailing_pattern_admissible (r : SailSpec w) (C : Nat) (seed : BinState)
 #print axioms sail_cargo_bins
 #print axioms sail_table_step
 #print axioms sailing_pattern_admissible
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- StockRidePattern's abstract cost-5 ride defers occupied sailings until
+-- disembarkation. A credit is held for one boarding and the first sail.
+-- This ledger does not yet prove the shadow-state projection or table
+-- construction; its statements are independent of any heuristic.
+inductive StockRidePhase where
+  | idle
+  | anchored
+  | traveled
+  deriving DecidableEq
+
+def stockRideCredit : StockRidePhase → Nat
+  | .idle => 0
+  | .anchored => 1
+  | .traveled => 4
+
+-- Indices: concrete ferry/service cost, abstract transition cost.
+inductive StockRideEvent : StockRidePhase → StockRidePhase → Nat → Nat → Prop where
+  | board : StockRideEvent .idle .anchored 1 0
+  | emptySail : StockRideEvent .idle .idle 3 3
+  | emptySailSame : StockRideEvent .idle .idle 3 0
+  | firstSail : StockRideEvent .anchored .traveled 3 0
+  | laterSail : StockRideEvent .traveled .traveled 3 0
+  | leaveUntraveled : StockRideEvent .anchored .idle 1 0
+  | leaveReturned : StockRideEvent .traveled .idle 1 0
+  | leaveChanged : StockRideEvent .traveled .idle 1 5
+
+theorem stock_event_credit {p q : StockRidePhase} {a b : Nat}
+    (st : StockRideEvent p q a b) :
+    b + stockRideCredit q ≤ a + stockRideCredit p := by
+  cases st <;> decide
+
+theorem stock_sum_replace_balance (f g : Nat → Nat) (p n : Nat)
+    (hp : p < n) (heq : ∀ q, q ≠ p → f q = g q) :
+    sumN f n + g p = sumN g n + f p := by
+  induction n with
+  | zero => omega
+  | succ n ih =>
+    by_cases e : n = p
+    · subst n
+      have he := sumN_congr f g p (fun q hq => heq q (by omega))
+      simp only [sumN]
+      omega
+    · have hh : p < n := by omega
+      have hi := ih hh
+      have eq := heq n e
+      simp only [sumN]
+      omega
+
+def stockFleetCredit (n : Nat) (s : Nat → StockRidePhase) : Nat :=
+  sumN (fun i => stockRideCredit (s i)) n
+
+-- One ferry changes per action. All other actions may stutter.
+def StockFleetEdge (n : Nat) (s t : Nat → StockRidePhase) (a b : Nat) : Prop :=
+  (∃ i q, i < n ∧ StockRideEvent (s i) q a b ∧ t = setAt s i q) ∨
+    (s = t ∧ b = 0)
+
+theorem stock_fleet_step_credit (n : Nat) {s t : Nat → StockRidePhase} {a b : Nat}
+    (st : StockFleetEdge n s t a b) :
+    b + stockFleetCredit n t ≤ a + stockFleetCredit n s := by
+  rcases st with ⟨i,q,hi,ev,rfl⟩ | ⟨rfl,rfl⟩
+  · have hb := stock_event_credit ev
+    have he := stock_sum_replace_balance
+      (fun j => stockRideCredit (s j))
+      (fun j => stockRideCredit (setAt s i q j)) i n hi
+      (by intro j hj; simp [setAt,hj])
+    change stockFleetCredit n s + stockRideCredit (setAt s i q i) =
+      stockFleetCredit n (setAt s i q) + stockRideCredit (s i) at he
+    have hq : stockRideCredit (setAt s i q i) = stockRideCredit q := by
+      simp [setAt]
+    rw [hq] at he
+    omega
+  · omega
+
+theorem stock_fleet_trace_credit (n : Nat) {s t : Nat → StockRidePhase}
+    {a b : Nat} (p : Path (StockFleetEdge n) s t a b) :
+    b + stockFleetCredit n t ≤ a + stockFleetCredit n s := by
+  induction p with
+  | nil s => simp
+  | cons st rest ih =>
+    have hs := stock_fleet_step_credit n st
+    omega
+
+-- At the queried state, an already occupied ferry is anchored at its
+-- CURRENT port, not a historical departure port: initial credit is 1.
+def stockInitialPhase (aboard : Nat → Bool) (i : Nat) : StockRidePhase :=
+  if aboard i then .anchored else .idle
+
+def stockInitialCredit (n : Nat) (aboard : Nat → Bool) : Nat :=
+  sumN (fun i => if aboard i then 1 else 0) n
+
+theorem stock_initial_credit_eq (n : Nat) (aboard : Nat → Bool) :
+    stockFleetCredit n (stockInitialPhase aboard) = stockInitialCredit n aboard := by
+  unfold stockFleetCredit stockInitialCredit
+  apply sumN_congr
+  intro i hi
+  cases h : aboard i <;> simp [stockInitialPhase,stockRideCredit,h]
+
+-- No terminal emptiness assumption: leftover credits are nonnegative.
+-- Subtracting the exact initial credit is sound for any certified
+-- abstract lower bound on the constructed ride trace.
+theorem stock_fleet_corrected_bound (n : Nat) (aboard : Nat → Bool)
+    {t : Nat → StockRidePhase} {a b table : Nat}
+    (p : Path (StockFleetEdge n) (stockInitialPhase aboard) t a b)
+    (lower : table ≤ b) :
+    table - stockInitialCredit n aboard ≤ a := by
+  have hb := stock_fleet_trace_credit n p
+  rw [stock_initial_credit_eq n aboard] at hb
+  omega
+
+-- SailingPattern is a sail-count bound. Road and handling terms may
+-- be combined only against the SAME concrete path's disjoint budgets.
+theorem sailing_partition_completion (w : World) (r : SailSpec w)
+    (C : Nat) (seed : BinState) (tab : SailTable w r C seed)
+    (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h}
+    {d x f roadBound handleBound : Nat}
+    (counts : TraceCounts w tr d x f) (v : CarrierInvariant w s)
+    (done : Goal w u) (rd : roadBound ≤ d) (hh : handleBound ≤ h) :
+    handleBound + roadBound + 3 * tab.value (sailView r s) ≤ m+h := by
+  have hs := sailing_pattern_admissible r C seed tab cap counts v done
+  have hm := trace_count_movement w counts
+  omega
+
+#print axioms stock_event_credit
+#print axioms stock_fleet_step_credit
+#print axioms stock_fleet_trace_credit
+#print axioms stock_fleet_corrected_bound
+#print axioms sailing_partition_completion
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- A batch models the directed writes of a vectorized relaxation:
+-- every proposal uses the batch's immutable snapshot, and the destination
+-- label is reduced by min. The exact NumPy/index refinement is separate.
+structure BellmanArc where
+  src : Nat
+  dst : Nat
+  cost : Nat
+
+def bellmanUpdate (snap d : Nat → Nat) (e : BellmanArc) : Nat → Nat :=
+  setAt d e.src (min (d e.src) (e.cost + snap e.dst))
+
+theorem bellman_update_mono (snap d : Nat → Nat) (e : BellmanArc) (i : Nat) :
+    bellmanUpdate snap d e i ≤ d i := by
+  by_cases he : i = e.src
+  · subst i
+    simpa [bellmanUpdate,setAt] using
+      Nat.min_le_left (d e.src) (e.cost + snap e.dst)
+  · simp [bellmanUpdate,setAt,he]
+
+theorem bellman_update_proposal (snap d : Nat → Nat) (e : BellmanArc) :
+    bellmanUpdate snap d e e.src ≤ e.cost + snap e.dst := by
+  simpa [bellmanUpdate,setAt] using
+    Nat.min_le_right (d e.src) (e.cost + snap e.dst)
+
+def bellmanBatch (snap : Nat → Nat) :
+    List BellmanArc → (Nat → Nat) → (Nat → Nat)
+  | [], d => d
+  | e :: es, d => bellmanBatch snap es (bellmanUpdate snap d e)
+
+theorem bellman_batch_mono (snap d : Nat → Nat) (edges : List BellmanArc) (i : Nat) :
+    bellmanBatch snap edges d i ≤ d i := by
+  induction edges generalizing d with
+  | nil => exact Nat.le_refl _
+  | cons e es ih =>
+    change bellmanBatch snap es (bellmanUpdate snap d e) i ≤ d i
+    exact Nat.le_trans (ih _) (bellman_update_mono snap d e i)
+
+theorem bellman_batch_relaxes (snap d : Nat → Nat) (edges : List BellmanArc) :
+    ∀ e, e ∈ edges → bellmanBatch snap edges d e.src ≤ e.cost + snap e.dst := by
+  induction edges generalizing d with
+  | nil => intro e h; simp at h
+  | cons a es ih =>
+    intro e h
+    rcases List.mem_cons.mp h with he | hm
+    · subst e
+      change bellmanBatch snap es (bellmanUpdate snap d a) a.src ≤ a.cost + snap a.dst
+      exact Nat.le_trans (bellman_batch_mono snap _ es _)
+        (bellman_update_proposal snap d a)
+    · exact ih (bellmanUpdate snap d a) e hm
+
+def bellmanSweep : List (List BellmanArc) → (Nat → Nat) → (Nat → Nat)
+  | [], d => d
+  | batch :: rest, d => bellmanSweep rest (bellmanBatch d batch d)
+
+theorem bellman_sweep_mono (batches : List (List BellmanArc)) (d : Nat → Nat) (i : Nat) :
+    bellmanSweep batches d i ≤ d i := by
+  induction batches generalizing d with
+  | nil => exact Nat.le_refl _
+  | cons batch rest ih =>
+    change bellmanSweep rest (bellmanBatch d batch d) i ≤ d i
+    exact Nat.le_trans (ih _) (bellman_batch_mono d d batch i)
+
+-- No shortest-path exactness or convergence assumption. If one full
+-- monotone sweep is unchanged, each intermediate batch is unchanged.
+theorem bellman_fixed_sweep_certificate (batches : List (List BellmanArc))
+    (d : Nat → Nat) (fixed : bellmanSweep batches d = d) :
+    ∀ batch, batch ∈ batches → ∀ e, e ∈ batch → d e.src ≤ e.cost + d e.dst := by
+  induction batches generalizing d with
+  | nil => intro batch hb; simp at hb
+  | cons batch rest ih =>
+    change bellmanSweep rest (bellmanBatch d batch d) = d at fixed
+    have same : bellmanBatch d batch d = d := by
+      funext i
+      have hlow := bellman_sweep_mono rest (bellmanBatch d batch d) i
+      rw [fixed] at hlow
+      exact Nat.le_antisymm (bellman_batch_mono d d batch i) hlow
+    have tailFixed := fixed
+    rw [same] at tailFixed
+    intro b hb e he
+    rcases List.mem_cons.mp hb with eq | hm
+    · subst b
+      have h := bellman_batch_relaxes d d batch e he
+      rw [same] at h
+      exact h
+    · exact ih d tailFixed b hm e he
+
+theorem bellman_sweep_preserves_zero (batches : List (List BellmanArc))
+    (d : Nat → Nat) (goal : Nat) (hz : d goal = 0) :
+    bellmanSweep batches d goal = 0 := by
+  have h := bellman_sweep_mono batches d goal
+  omega
+
+def BellmanBatchEdge (batches : List (List BellmanArc))
+    (s t a _b : Nat) : Prop :=
+  ∃ batch, batch ∈ batches ∧ (⟨s,t,a⟩ : BellmanArc) ∈ batch
+
+-- A finite ceiling, including a label still equal to 60000, is sound
+-- whenever the table passed the certificate and the goal label is zero.
+theorem bellman_fixed_path_bound (batches : List (List BellmanArc))
+    (d : Nat → Nat) (fixed : bellmanSweep batches d = d)
+    {s t m h : Nat} (p : Path (BellmanBatchEdge batches) s t m h)
+    (goal : d t = 0) : d s ≤ m := by
+  have hstep : ∀ s t a b, BellmanBatchEdge batches s t a b → d s ≤ a + d t := by
+    intro s t a b edge
+    obtain ⟨batch,hb,he⟩ := edge
+    exact bellman_fixed_sweep_certificate batches d fixed batch hb _ he
+  have hp := potential_bound d hstep p
+  omega
+
+-- The uint16 arithmetic range used by Pattern, SailingPattern and
+-- StockRidePattern: no wraparound when the bounded inputs are added.
+theorem bellman_uint16_proposal_safe (label cost : Nat)
+    (hl : label ≤ 60000) (hc : cost ≤ 5) : label + cost < 65536 := by
+  omega
+
+-- Pointwise selection and maximum of already certified complete estimates
+-- require no consistency assumption and may depend on the queried state.
+theorem admissible_pointwise_le (w : World) (init : State) (h k : State → Nat)
+    (hk : AdmissibleOnReachable w init k) (le : ∀ s, h s ≤ k s) :
+    AdmissibleOnReachable w init h := by
+  intro s reach u m a path goal
+  exact Nat.le_trans (le s) (hk s reach u m a path goal)
+
+theorem admissible_max_complete (w : World) (init : State) (h k : State → Nat)
+    (hh : AdmissibleOnReachable w init h) (hk : AdmissibleOnReachable w init k) :
+    AdmissibleOnReachable w init (fun s => max (h s) (k s)) := by
+  intro s reach u m a path goal
+  exact max_bound _ _ _ (hh s reach u m a path goal) (hk s reach u m a path goal)
+
+#print axioms bellman_fixed_sweep_certificate
+#print axioms bellman_sweep_preserves_zero
+#print axioms bellman_fixed_path_bound
+#print axioms bellman_uint16_proposal_safe
+#print axioms admissible_pointwise_le
+#print axioms admissible_max_complete
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- A parcel already delivered may be frozen at its actual goal. Removing
+-- future movements of that parcel cannot consume any vehicle capacity.
+def freezeDelivered (w : World) (s : State) (p : Nat) : State :=
+  {s with parcel := setAt s.parcel p (.ground (w.goal p))}
+
+theorem freeze_setAt_shadow {α : Type} (f : Nat → α) (p : Nat) (x y : α) :
+    setAt (setAt f p x) p y = setAt f p y := by
+  funext i
+  by_cases he : i = p <;> simp [setAt,he]
+
+theorem freeze_setAt_swap {α : Type} (f : Nat → α) (p q : Nat)
+    (x y : α) (hne : q ≠ p) :
+    setAt (setAt f q x) p y = setAt (setAt f p y) q x := by
+  funext i
+  by_cases hp : i = p
+  · subst i
+    simp [setAt,Ne.symm hne]
+  · by_cases hq : i = q <;> simp [setAt,hp,hq,hne]
+
+theorem freeze_overwrite (w : World) (s : State) (p : Nat) (v : ParcelPosition) :
+    freezeDelivered w {s with parcel := setAt s.parcel p v} p =
+      freezeDelivered w s p := by
+  change {s with parcel := setAt (setAt s.parcel p v) p (.ground (w.goal p))} =
+    {s with parcel := setAt s.parcel p (.ground (w.goal p))}
+  rw [freeze_setAt_shadow]
+
+theorem freeze_other_update (w : World) (s : State) (p q : Nat)
+    (v : ParcelPosition) (hne : q ≠ p) :
+    freezeDelivered w {s with parcel := setAt s.parcel q v} p =
+      {freezeDelivered w s p with parcel := setAt (freezeDelivered w s p).parcel q v} := by
+  change {s with parcel := setAt (setAt s.parcel q v) p (.ground (w.goal p))} =
+    {s with parcel := setAt (setAt s.parcel p (.ground (w.goal p))) q v}
+  rw [freeze_setAt_swap s.parcel p q v (.ground (w.goal p)) hne]
+
+theorem freeze_other_position (w : World) (s : State) (p q : Nat) (hne : q ≠ p) :
+    (freezeDelivered w s p).parcel q = s.parcel q := by
+  simp [freezeDelivered,setAt,hne]
+
+theorem freeze_load_le (w : World) (s : State) (p t : Nat) :
+    load w (freezeDelivered w s p) t ≤ load w s t := by
+  unfold load
+  apply sumN_mono
+  intro q _
+  by_cases he : q = p
+  · subst q
+    simp [freezeDelivered,setAt]
+  · rw [freeze_other_position w s p q he]
+    exact Nat.le_refl _
+
+theorem freeze_goal (w : World) (s : State) (p : Nat) (g : Goal w s) :
+    Goal w (freezeDelivered w s p) := by
+  intro q hq
+  by_cases he : q = p
+  · subst q
+    simp [freezeDelivered,setAt]
+  · rw [freeze_other_position w s p q he]
+    exact g q hq
+
+theorem freeze_delivered_identity (w : World) (s : State) (p : Nat)
+    (hp : s.parcel p = .ground (w.goal p)) :
+    freezeDelivered w s p = s := by
+  unfold freezeDelivered
+  rw [← hp,setAt_current]
+
+-- This relation explicitly forbids every move of the frozen parcel;
+-- merely constructing an arbitrary legal suffix would not suffice.
+def ParcelFixedStep (w : World) (p : Nat) (s u : State) (m h : Nat) : Prop :=
+  Step w s u m h ∧ s.parcel p = u.parcel p
+
+theorem freeze_step_replay (w : World) (p : Nat)
+    {s u : State} {m h : Nat} (st : Step w s u m h) :
+    (freezeDelivered w u p = freezeDelivered w s p ∧ m = 0 ∧ h = 1) ∨
+    (Step w (freezeDelivered w s p) (freezeDelivered w u p) m h ∧
+      s.parcel p = u.parcel p) := by
+  cases st with
+  | drive t a b ht hr hv =>
+    exact Or.inr ⟨Step.drive (freezeDelivered w s p) t a b ht hr hv,rfl⟩
+  | board t f a ht hf hr room hv =>
+    exact Or.inr ⟨Step.board (freezeDelivered w s p) t f a ht hf hr room hv,rfl⟩
+  | disembark t f ht hv =>
+    exact Or.inr ⟨Step.disembark (freezeDelivered w s p) t f ht hv,rfl⟩
+  | sail f b hr hn hv =>
+    exact Or.inr ⟨Step.sail (freezeDelivered w s p) f b hr hn hv,rfl⟩
+  | load q t a hq ht room hv =>
+    by_cases he : q = p
+    · subst q
+      exact Or.inl ⟨freeze_overwrite w s p (.onTruck t),rfl,rfl⟩
+    · right
+      constructor
+      · rw [freeze_other_update w s p q (.onTruck t) he]
+        have hp' := (freeze_other_position w s p q he).trans hq
+        have hb := freeze_load_le w s p t
+        have room' : load w (freezeDelivered w s p) t + w.weight q ≤ w.capacity t := by omega
+        exact Step.load (freezeDelivered w s p) q t a hp' ht room' hv
+      · simp [setAt,Ne.symm he]
+  | unload q t a hq ht hv =>
+    by_cases he : q = p
+    · subst q
+      exact Or.inl ⟨freeze_overwrite w s p (.ground a),rfl,rfl⟩
+    · right
+      constructor
+      · rw [freeze_other_update w s p q (.ground a) he]
+        have hp' := (freeze_other_position w s p q he).trans hq
+        exact Step.unload (freezeDelivered w s p) q t a hp' ht hv
+      · simp [setAt,Ne.symm he]
+
+-- Delete the handling operations of p, retaining all other actions and
+-- their movement cost. If the endpoints differ for p, at least one
+-- handling operation was removed. This is a path theorem, not an A* claim.
+theorem freeze_path_replay (w : World) (p : Nat)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h) :
+    ∃ h', Path (ParcelFixedStep w p) (freezeDelivered w s p) (freezeDelivered w u p) m h' ∧
+      h' ≤ h ∧ (s.parcel p ≠ u.parcel p → h'+1 ≤ h) := by
+  induction path with
+  | nil s =>
+    exact ⟨0,Path.nil _,Nat.le_refl _,by intro hn; exact False.elim (hn rfl)⟩
+  | @cons s t u a b m h st rest ih =>
+    obtain ⟨h',pp,hb,hs⟩ := ih
+    rcases freeze_step_replay w p st with ⟨eq,ha,hc⟩ | ⟨step,pres⟩
+    · subst a
+      subst b
+      rw [eq] at pp
+      refine ⟨h',?_,by omega,?_⟩
+      · simpa using pp
+      · intro _
+        omega
+    · have hold : (freezeDelivered w s p).parcel p = (freezeDelivered w t p).parcel p := by
+        simp [freezeDelivered,setAt]
+      refine ⟨b+h',Path.cons ⟨step,hold⟩ pp,by omega,?_⟩
+      intro hn
+      have hn' : t.parcel p ≠ u.parcel p := by
+        intro he
+        exact hn (pres.trans he)
+      have ht := hs hn'
+      omega
+
+-- Pruning future reloads of any already delivered parcel preserves
+-- a no-more-expensive path to the identical terminal state.
+theorem delivered_parcel_can_remain (w : World) (p : Nat)
+    {s u : State} {m h : Nat} (hp : p < w.parcels)
+    (delivered : s.parcel p = .ground (w.goal p))
+    (path : Path (Step w) s u m h) (done : Goal w u) :
+    ∃ h', h' ≤ h ∧ Path (ParcelFixedStep w p) s u m h' := by
+  obtain ⟨h',pp,hb,_⟩ := freeze_path_replay w p path
+  rw [freeze_delivered_identity w s p delivered,
+    freeze_delivered_identity w u p (done p hp)] at pp
+  exact ⟨h',hb,pp⟩
+
+-- Forced final delivery: from EVERY legal completion, construct a
+-- no-more-expensive one whose FIRST action is this particular unload.
+-- The remaining path never moves p again.
+theorem advance_final_delivery (w : World) (p t : Nat)
+    {s u : State} {m h : Nat}
+    (hp : s.parcel p = .onTruck t) (ht : s.truck t = .land (w.goal p))
+    (hv : p < w.parcels ∧ t < w.trucks ∧ w.goal p < w.locations)
+    (path : Path (Step w) s u m h) (done : Goal w u) :
+    ∃ h', 1+h' ≤ h ∧
+      Step w s (freezeDelivered w s p) 0 1 ∧
+      Path (ParcelFixedStep w p) (freezeDelivered w s p) u m h' := by
+  obtain ⟨h',pp,_,hs⟩ := freeze_path_replay w p path
+  have hn : s.parcel p ≠ u.parcel p := by simp [hp,done p hv.1]
+  have hb := hs hn
+  rw [freeze_delivered_identity w u p (done p hv.1)] at pp
+  exact ⟨h',by omega,Step.unload s p t (w.goal p) hp ht hv,pp⟩
+
+#print axioms freeze_load_le
+#print axioms freeze_step_replay
+#print axioms freeze_path_replay
+#print axioms delivered_parcel_can_remain
+#print axioms advance_final_delivery
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- StockRide projection. The shadow remembers an occupied ferry's port
+-- at the beginning of its current ride; an empty ferry is never deferred.
+-- Abstract positions are Fin, so the finite table's index domain is explicit.
+structure RideSpec (w : World) where
+  size : Nat
+  loc : Nat → Fin (size+1)
+  road : ∀ a b, w.road a b → loc a = loc b
+  oneSlot : ∀ f, f < w.ferries → w.slots f ≤ 1
+
+structure RideView (w : World) (n : Nat) where
+  ferry : Fin w.ferries → Fin (n+1)
+  truck : Fin w.trucks → Fin (n+1)
+  parcel : Fin w.parcels → Fin (n+1)
+
+def rideTruck (r : RideSpec w) (s : State)
+    (A : Nat → Fin (r.size+1)) (t : Nat) : Fin (r.size+1) :=
+  match s.truck t with
+  | .land a => r.loc a
+  | .onFerry f => A f
+
+def rideParcel (r : RideSpec w) (s : State)
+    (A : Nat → Fin (r.size+1)) (p : Nat) : Fin (r.size+1) :=
+  match s.parcel p with
+  | .ground a => r.loc a
+  | .onTruck t => rideTruck r s A t
+
+def rideView (r : RideSpec w) (s : State)
+    (A : Nat → Fin (r.size+1)) : RideView w r.size :=
+  ⟨fun f => if 0 < w.slots f.val then A f.val else 0,
+   fun t => rideTruck r s A t.val, fun p => rideParcel r s A p.val⟩
+
+theorem ride_view_ext {n : Nat} {x y : RideView w n}
+    (hf : x.ferry = y.ferry) (ht : x.truck = y.truck)
+    (hp : x.parcel = y.parcel) : x = y := by
+  cases x; cases y; simp_all
+
+theorem ride_view_congr (r : RideSpec w) {s u : State}
+    {A B : Nat → Fin (r.size+1)}
+    (hf : ∀ f, f < w.ferries → 0 < w.slots f → A f = B f)
+    (ht : ∀ t, t < w.trucks → rideTruck r s A t = rideTruck r u B t)
+    (hp : ∀ p, p < w.parcels → rideParcel r s A p = rideParcel r u B p) :
+    rideView r s A = rideView r u B := by
+  apply ride_view_ext
+  · funext f
+    change (if 0 < w.slots f.val then A f.val else 0) = _
+    by_cases h : 0 < w.slots f.val
+    · simp [rideView,h,hf f.val f.isLt h]
+    · simp [rideView,h]
+  · funext t
+    exact ht t.val t.isLt
+  · funext p
+    exact hp p.val p.isLt
+
+theorem ride_parcel_congr (r : RideSpec w) {s u : State}
+    {A B : Nat → Fin (r.size+1)} (v : ValidParcelCarriers w s)
+    (ht : ∀ t, t < w.trucks → rideTruck r s A t = rideTruck r u B t)
+    (hp : s.parcel = u.parcel) (p : Nat) (hv : p < w.parcels) :
+    rideParcel r s A p = rideParcel r u B p := by
+  cases h : s.parcel p with
+  | ground a => simp [rideParcel,← hp,h]
+  | onTruck t => simpa [rideParcel,← hp,h] using ht t (v p hv t h)
+
+def RideAnchored (r : RideSpec w) (s : State)
+    (A : Nat → Fin (r.size+1)) : Prop :=
+  ∀ f, f < w.ferries → occupancy w s f = 0 → A f = r.loc (s.ferry f)
+
+def rideInitial (r : RideSpec w) (s : State) (f : Nat) : Fin (r.size+1) :=
+  r.loc (s.ferry f)
+
+def rideCreditAt (r : RideSpec w) (s : State)
+    (A : Nat → Fin (r.size+1)) (f : Nat) : Nat :=
+  if occupancy w s f = 0 then 0 else if A f = r.loc (s.ferry f) then 1 else 4
+
+def rideCredit (r : RideSpec w) (s : State)
+    (A : Nat → Fin (r.size+1)) : Nat :=
+  sumN (rideCreditAt r s A) w.ferries
+
+theorem ride_occ_zero_no_passenger (w : World) (s : State) (f t : Nat)
+    (hz : occupancy w s f = 0) (ht : t < w.trucks) :
+    s.truck t ≠ .onFerry f := by
+  intro he
+  have h := sumN_eq_zero_point (fun q => if s.truck q = .onFerry f then 1 else 0)
+    w.trucks hz t ht
+  simp [he] at h
+
+theorem ride_occ_replace_eq (w : World) (s : State) (t f : Nat) (p : TruckPosition)
+    (same : (p = .onFerry f) ↔ (s.truck t = .onFerry f)) :
+    occupancy w {s with truck := setAt s.truck t p} f = occupancy w s f := by
+  unfold occupancy
+  apply sumN_congr
+  intro q _
+  by_cases he : q = t
+  · subst q
+    simp only [setAt,if_true,same]
+  · simp [setAt,he]
+
+theorem ride_credit_same (r : RideSpec w) {s u : State}
+    {A B : Nat → Fin (r.size+1)}
+    (ho : ∀ f, f < w.ferries → occupancy w s f = occupancy w u f)
+    (ha : ∀ f, f < w.ferries → A f = B f)
+    (hf : ∀ f, f < w.ferries → s.ferry f = u.ferry f) :
+    rideCredit r s A = rideCredit r u B := by
+  unfold rideCredit
+  apply sumN_congr
+  intro f h
+  simp [rideCreditAt,ho f h,ha f h,hf f h]
+
+theorem ride_credit_local (r : RideSpec w) {s u : State}
+    {A B : Nat → Fin (r.size+1)} (f absCost realCost : Nat)
+    (hf : f < w.ferries)
+    (other : ∀ g, g ≠ f → rideCreditAt r s A g = rideCreditAt r u B g)
+    (localCost : absCost + rideCreditAt r u B f ≤ realCost + rideCreditAt r s A f) :
+    absCost + rideCredit r u B ≤ realCost + rideCredit r s A := by
+  have h := stock_sum_replace_balance (rideCreditAt r s A) (rideCreditAt r u B)
+    f w.ferries hf other
+  change rideCredit r s A + rideCreditAt r u B f =
+    rideCredit r u B + rideCreditAt r s A f at h
+  omega
+
+def rideEmptyMove {n : Nat} (v : RideView w n) (f : Nat) (b : Fin (n+1)) :
+    RideView w n :=
+  {v with ferry := fun g => if g.val = f then b else v.ferry g}
+
+def rideFullMove {n : Nat} (v : RideView w n) (f t : Nat) (b : Fin (n+1))
+    (cargo : Nat → Bool) : RideView w n :=
+  {v with ferry := fun g => if g.val = f then b else v.ferry g,
+          truck := fun q => if q.val = t then b else v.truck q,
+          parcel := fun p => if cargo p.val then b else v.parcel p}
+
+-- Labeled view of the actual table. Counts/weak compositions and
+-- mixed-radix storage are refined separately; this is the semantic graph.
+structure RideTable (w : World) (r : RideSpec w) (C : Nat) where
+  value : RideView w r.size → Nat
+  empty : ∀ v f b, f < w.ferries → 0 < w.slots f →
+    value v ≤ 3 + value (rideEmptyMove v f b)
+  full : ∀ v f t b cargo (hf : f < w.ferries) (ht : t < w.trucks),
+    0 < w.slots f → v.truck ⟨t,ht⟩ = v.ferry ⟨f,hf⟩ →
+    (∀ p : Fin w.parcels, cargo p.val = true → v.parcel p = v.ferry ⟨f,hf⟩) →
+    sumN (fun p => if cargo p then w.weight p else 0) w.parcels ≤ C →
+    value v ≤ 5 + value (rideFullMove v f t b cargo)
+  goal : ∀ v, (∀ p : Fin w.parcels, v.parcel p = r.loc (w.goal p.val)) → value v = 0
+
+theorem ride_full_identity {n : Nat} (v : RideView w n) (f t : Nat)
+    (b : Fin (n+1)) (cargo : Nat → Bool)
+    (hf : ∀ g : Fin w.ferries, g.val = f → v.ferry g = b)
+    (ht : ∀ q : Fin w.trucks, q.val = t → v.truck q = b)
+    (hp : ∀ p : Fin w.parcels, cargo p.val = true → v.parcel p = b) :
+    rideFullMove v f t b cargo = v := by
+  apply ride_view_ext
+  · funext g
+    by_cases h : g.val = f
+    · simp [rideFullMove,h,hf g h]
+    · simp [rideFullMove,h]
+  · funext q
+    by_cases h : q.val = t
+    · simp [rideFullMove,h,ht q h]
+    · simp [rideFullMove,h]
+  · funext p
+    cases h : cargo p.val
+    · simp [rideFullMove,h]
+    · simp [rideFullMove,h,hp p h]
+
+theorem ride_initial_view (r : RideSpec w) (s : State) :
+    (∀ t : Fin w.trucks, (rideView r s (rideInitial r s)).truck t = r.loc (physicalTruck s t.val)) ∧
+    (∀ p : Fin w.parcels, (rideView r s (rideInitial r s)).parcel p = r.loc (physicalParcel s p.val)) := by
+  have ht : ∀ t, rideTruck r s (rideInitial r s) t = r.loc (physicalTruck s t) := by
+    intro t
+    cases h : s.truck t <;> simp [rideTruck,rideInitial,physicalTruck,h]
+  exact ⟨fun t => ht t.val,fun p => by
+    cases h : s.parcel p.val <;> simp [rideView,rideParcel,physicalParcel,h,ht]⟩
+
+theorem ride_initial_credit (r : RideSpec w) (s : State)
+    (v : CarrierInvariant w s) :
+    rideCredit r s (rideInitial r s) =
+      sumN (fun t => match s.truck t with | .land _ => 0 | .onFerry _ => 1) w.trucks := by
+  have eq : rideCredit r s (rideInitial r s) = sumN (occupancy w s) w.ferries := by
+    unfold rideCredit
+    apply sumN_congr
+    intro f hf
+    have hb : occupancy w s f ≤ 1 := Nat.le_trans (v.occupancy f hf) (r.oneSlot f hf)
+    by_cases hz : occupancy w s f = 0
+    · simp [rideCreditAt,hz]
+    · have he : occupancy w s f = 1 := by omega
+      simp [rideCreditAt,rideInitial,he]
+  rw [eq]
+  unfold occupancy
+  rw [sumN_swap]
+  apply sumN_congr
+  intro t ht
+  cases h : s.truck t with
+  | land a =>
+    have he : sumN (fun f => if TruckPosition.land a = .onFerry f then 1 else 0) w.ferries = 0 := by
+      simp [sumN_zero]
+    simpa [h] using he
+  | onFerry f =>
+    have hf := (v.trucks t ht f h).1
+    have he := sumN_single (fun g => if TruckPosition.onFerry f = .onFerry g then 1 else 0)
+      w.ferries f hf (by intro q hq hn; simp [Ne.symm hn])
+    simpa [h] using he
+
+#print axioms ride_initial_view
+#print axioms ride_initial_credit
+#print axioms ride_credit_local
+#print axioms ride_occ_replace_eq
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Full simulation of the six concrete legal actions into the deferred
+-- ride abstraction. Each step is charged only to ferry/service cost.
+theorem ride_table_step (r : RideSpec w) (C : Nat) (tab : RideTable w r C)
+    (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    {s u : State} {a : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u a m h) (v : CarrierInvariant w s)
+    (A : Nat → Fin (r.size+1)) (anch : RideAnchored r s A) :
+    ∃ B, RideAnchored r u B ∧
+      tab.value (rideView r s A) + rideCredit r u B ≤
+        serviceCount a + 3*sailCount a + tab.value (rideView r u B) + rideCredit r s A := by
+  cases st with
+  | drive t a b ht hr hv =>
+    let u := {s with truck := setAt s.truck t (.land b)}
+    have ho : ∀ f, occupancy w u f = occupancy w s f := by
+      intro f
+      exact ride_occ_replace_eq w s t f (.land b) (by simp [ht])
+    have htruck : ∀ q, q < w.trucks → rideTruck r s A q = rideTruck r u A q := by
+      intro q hq
+      by_cases he : q = t
+      · subst q; simp [rideTruck,u,setAt,ht,r.road a b hr]
+      · simp [rideTruck,u,setAt,he]
+    have hvw := ride_view_congr r (s := s) (u := u) (A := A) (B := A)
+      (by intros; rfl) htruck (ride_parcel_congr r v.parcels htruck rfl)
+    have hcr := ride_credit_same r (s := s) (u := u) (A := A) (B := A)
+      (fun f _ => (ho f).symm) (by intros; rfl) (by intros; rfl)
+    refine ⟨A,?_,?_⟩
+    · intro f hf hz
+      change occupancy w u f = 0 at hz
+      rw [ho f] at hz
+      exact anch f hf hz
+    · change tab.value (rideView r s A) + rideCredit r u A ≤
+        serviceCount (.drive t a b) + 3*sailCount (.drive t a b) +
+          tab.value (rideView r u A) + rideCredit r s A
+      rw [← hvw,← hcr]
+      simp [serviceCount,sailCount]
+  | board t f a ht hf hr room hv =>
+    let u := {s with truck := setAt s.truck t (.onFerry f)}
+    have hz : occupancy w s f = 0 := by
+      have hs := r.oneSlot f hv.2.1
+      omega
+    have hone : occupancy w u f = 1 := by
+      have hb := occupancy_after_board w s t f a hv.1 ht
+      change occupancy w u f = occupancy w s f+1 at hb
+      omega
+    have ho : ∀ g, g ≠ f → occupancy w u g = occupancy w s g := by
+      intro g hg
+      exact ride_occ_replace_eq w s t g (.onFerry f) (by simp [ht,Ne.symm hg])
+    have heq := anch f hv.2.1 hz
+    have htruck : ∀ q, q < w.trucks → rideTruck r s A q = rideTruck r u A q := by
+      intro q hq
+      by_cases he : q = t
+      · subst q; simp [rideTruck,u,setAt,ht,heq,hf]
+      · simp [rideTruck,u,setAt,he]
+    have hvw := ride_view_congr r (s := s) (u := u) (A := A) (B := A)
+      (by intros; rfl) htruck (ride_parcel_congr r v.parcels htruck rfl)
+    have hc := ride_credit_local r (s := s) (u := u) (A := A) (B := A)
+      f 0 1 hv.2.1
+      (by intro g hg; simp [rideCreditAt,u,← ho g hg])
+      (by simp [rideCreditAt,hz,hone,heq,u])
+    refine ⟨A,?_,?_⟩
+    · intro g hg hzero
+      by_cases he : g = f
+      · subst g
+        change occupancy w u f = 0 at hzero
+        omega
+      · change occupancy w u g = 0 at hzero
+        rw [ho g he] at hzero
+        exact anch g hg hzero
+    · change tab.value (rideView r s A) + rideCredit r u A ≤
+        serviceCount (.board t f a) + 3*sailCount (.board t f a) +
+          tab.value (rideView r u A) + rideCredit r s A
+      rw [← hvw]
+      simp only [serviceCount,sailCount]
+      omega
+  | disembark t f ht hv =>
+    let u := {s with truck := setAt s.truck t (.land (s.ferry f))}
+    let b := r.loc (s.ferry f)
+    let B := setAt A f b
+    let cargo := fun p => decide (s.parcel p = .onTruck t)
+    have hs := v.occupancy f hv.2
+    have hc := r.oneSlot f hv.2
+    have he := occupancy_after_disembark w s t f hv.1 ht
+    change occupancy w s f = occupancy w u f+1 at he
+    have hz : occupancy w u f = 0 := by omega
+    have hone : occupancy w s f = 1 := by omega
+    have pos : 0 < w.slots f := by omega
+    have ho : ∀ g, g ≠ f → occupancy w u g = occupancy w s g := by
+      intro g hg
+      exact ride_occ_replace_eq w s t g (.land (s.ferry f)) (by simp [ht,Ne.symm hg])
+    have other : ∀ q, q < w.trucks → q ≠ t → s.truck q ≠ .onFerry f := by
+      intro q hq hn hqf
+      have hn' := ride_occ_zero_no_passenger w u f q hz hq
+      apply hn'
+      simpa [u,setAt,hn] using hqf
+    have htruck : ∀ q, q < w.trucks → q ≠ t → rideTruck r s A q = rideTruck r u B q := by
+      intro q hq hn
+      cases hqv : s.truck q with
+      | land c => simp [rideTruck,u,setAt,hn,hqv]
+      | onFerry g =>
+        have hgf : g ≠ f := by
+          intro eq
+          subst g
+          exact other q hq hn hqv
+        simp [rideTruck,u,setAt,hn,hqv,B,hgf]
+    have hvw : rideView r u B = rideFullMove (rideView r s A) f t b cargo := by
+      apply ride_view_ext
+      · funext g
+        by_cases hgf : g.val = f
+        · simp [rideView,rideFullMove,B,setAt,hgf,pos]
+        · simp [rideView,rideFullMove,B,setAt,hgf]
+      · funext q
+        by_cases hqt : q.val = t
+        · simp [rideView,rideFullMove,rideTruck,u,setAt,hqt,b]
+        · simpa [rideView,rideFullMove,hqt] using (htruck q.val q.isLt hqt).symm
+      · funext p
+        cases hp : s.parcel p.val with
+        | ground c => simp [rideView,rideFullMove,rideParcel,u,cargo,hp]
+        | onTruck q =>
+          by_cases hqt : q = t
+          · subst q; simp [rideView,rideFullMove,rideParcel,rideTruck,u,cargo,hp,setAt,b]
+          · have hq := v.parcels p.val p.isLt q hp
+            simpa [rideView,rideFullMove,rideParcel,u,cargo,hp,hqt] using
+              (htruck q hq hqt).symm
+    have truckOrigin : (rideView r s A).truck ⟨t,hv.1⟩ = (rideView r s A).ferry ⟨f,hv.2⟩ := by
+      simp [rideView,rideTruck,ht,pos]
+    have parcelOrigin : ∀ p : Fin w.parcels, cargo p.val = true →
+        (rideView r s A).parcel p = (rideView r s A).ferry ⟨f,hv.2⟩ := by
+      intro p hp
+      have hp' : s.parcel p.val = .onTruck t := by simpa [cargo] using hp
+      simp [rideView,rideParcel,rideTruck,hp',ht,pos]
+    have cargoFit : sumN (fun p => if cargo p then w.weight p else 0) w.parcels ≤ C := by
+      have hload := Nat.le_trans (v.loads t hv.1) (cap t hv.1)
+      simpa [cargo,load] using hload
+    have hother : ∀ g, g ≠ f → rideCreditAt r s A g = rideCreditAt r u B g := by
+      intro g hg
+      have hg' := ho g hg
+      simp [rideCreditAt,← hg',u,B,setAt,hg]
+    have hanch : RideAnchored r u B := by
+      intro g hg hgzero
+      by_cases heq : g = f
+      · simp [B,setAt,heq,u,b]
+      · have ho' : occupancy w s g = 0 := by
+          rw [← ho g heq]
+          exact hgzero
+        simpa [B,setAt,heq,u] using anch g hg ho'
+    refine ⟨B,hanch,?_⟩
+    change tab.value (rideView r s A) + rideCredit r u B ≤
+      serviceCount (.disembark t f) + 3*sailCount (.disembark t f) +
+        tab.value (rideView r u B) + rideCredit r s A
+    simp only [serviceCount,sailCount]
+    by_cases same : A f = b
+    · have hid : rideFullMove (rideView r s A) f t b cargo = rideView r s A := by
+        apply ride_full_identity
+        · intro g hg
+          simp [rideView,hg,pos,same]
+        · intro q hq
+          simp [rideView,rideTruck,hq,ht,same]
+        · intro p hp
+          rw [parcelOrigin p hp]
+          simp [rideView,pos,same]
+      have hbudget := ride_credit_local r (s := s) (u := u) (A := A) (B := B)
+        f 0 1 hv.2 hother (by simp [rideCreditAt,hz,hone,same,b])
+      rw [hvw,hid]
+      omega
+    · have hvb := tab.full (rideView r s A) f t b cargo hv.2 hv.1 pos
+        truckOrigin parcelOrigin cargoFit
+      rw [← hvw] at hvb
+      have hbudget := ride_credit_local r (s := s) (u := u) (A := A) (B := B)
+        f 5 1 hv.2 hother (by simp [rideCreditAt,hz,hone,same,b])
+      omega
+  | sail f b hr hn hv =>
+    let u := {s with ferry := setAt s.ferry f b}
+    by_cases hz : occupancy w s f = 0
+    · let B := setAt A f (r.loc b)
+      have htruck : ∀ q, q < w.trucks → rideTruck r s A q = rideTruck r u B q := by
+        intro q hq
+        cases hqv : s.truck q with
+        | land c => simp [rideTruck,u,hqv]
+        | onFerry g =>
+          have hgf : g ≠ f := by
+            intro he
+            subst g
+            exact ride_occ_zero_no_passenger w s f q hz hq hqv
+          simp [rideTruck,u,hqv,B,setAt,hgf]
+      have hparcel := ride_parcel_congr r v.parcels htruck rfl
+      have hother : ∀ g, g ≠ f → rideCreditAt r s A g = rideCreditAt r u B g := by
+        intro g hg
+        simp [rideCreditAt,occupancy,u,B,setAt,hg]
+      have hzero : occupancy w u f = 0 := hz
+      have hanch : RideAnchored r u B := by
+        intro g hg hgzero
+        by_cases he : g = f
+        · simp [B,u,setAt,he]
+        · simpa [B,u,setAt,he] using anch g hg hgzero
+      refine ⟨B,hanch,?_⟩
+      change tab.value (rideView r s A) + rideCredit r u B ≤
+        serviceCount (.sail f b) + 3*sailCount (.sail f b) +
+          tab.value (rideView r u B) + rideCredit r s A
+      simp only [serviceCount,sailCount]
+      by_cases pos : 0 < w.slots f
+      · have hvw : rideView r u B = rideEmptyMove (rideView r s A) f (r.loc b) := by
+          apply ride_view_ext
+          · funext g
+            by_cases hgf : g.val = f
+            · simp [rideView,rideEmptyMove,B,setAt,hgf,pos]
+            · simp [rideView,rideEmptyMove,B,setAt,hgf]
+          · funext q
+            exact (htruck q.val q.isLt).symm
+          · funext p
+            exact (hparcel p.val p.isLt).symm
+        have hvb := tab.empty (rideView r s A) f (r.loc b) hv.1 pos
+        rw [← hvw] at hvb
+        have hbudget := ride_credit_local r (s := s) (u := u) (A := A) (B := B)
+          f 3 3 hv.1 hother (by simp [rideCreditAt,hz,hzero])
+        omega
+      · have hvw := ride_view_congr r (s := s) (u := u) (A := A) (B := B)
+          (by
+            intro g hg hp
+            have hgf : g ≠ f := by
+              intro he
+              subst g
+              exact pos hp
+            simp [B,setAt,hgf]) htruck hparcel
+        have hbudget := ride_credit_local r (s := s) (u := u) (A := A) (B := B)
+          f 0 3 hv.1 hother (by simp [rideCreditAt,hz,hzero])
+        rw [← hvw]
+        omega
+    · have hother : ∀ g, g ≠ f → rideCreditAt r s A g = rideCreditAt r u A g := by
+        intro g hg
+        simp [rideCreditAt,occupancy,u,setAt,hg]
+      have hzero : occupancy w u f ≠ 0 := hz
+      have hbudget := ride_credit_local r (s := s) (u := u) (A := A) (B := A)
+        f 0 3 hv.1 hother (by
+          simp only [rideCreditAt,hz,hzero,if_false]
+          split <;> split <;> omega)
+      refine ⟨A,?_,?_⟩
+      · intro g hg hgzero
+        by_cases he : g = f
+        · subst g
+          exact False.elim (hzero hgzero)
+        · simpa [u,setAt,he] using anch g hg hgzero
+      · have hvw : rideView r s A = rideView r u A := rfl
+        change tab.value (rideView r s A) + rideCredit r u A ≤
+          serviceCount (.sail f b) + 3*sailCount (.sail f b) +
+            tab.value (rideView r u A) + rideCredit r s A
+        rw [← hvw]
+        simp only [serviceCount,sailCount]
+        omega
+  | load p t a hp ht room hv =>
+    let u := {s with parcel := setAt s.parcel p (.onTruck t)}
+    have hvw := ride_view_congr r (s := s) (u := u) (A := A) (B := A)
+      (by intros; rfl) (by intros; rfl) (by
+        intro q hq
+        by_cases he : q = p
+        · subst q; simp [rideParcel,rideTruck,u,setAt,hp,ht]
+        · simp [rideParcel,rideTruck,u,setAt,he])
+    have hcr : rideCredit r s A = rideCredit r u A := rfl
+    refine ⟨A,anch,?_⟩
+    change tab.value (rideView r s A) + rideCredit r u A ≤
+      serviceCount (.load p t a) + 3*sailCount (.load p t a) +
+        tab.value (rideView r u A) + rideCredit r s A
+    rw [← hvw,← hcr]
+    simp [serviceCount,sailCount]
+  | unload p t a hp ht hv =>
+    let u := {s with parcel := setAt s.parcel p (.ground a)}
+    have hvw := ride_view_congr r (s := s) (u := u) (A := A) (B := A)
+      (by intros; rfl) (by intros; rfl) (by
+        intro q hq
+        by_cases he : q = p
+        · subst q; simp [rideParcel,rideTruck,u,setAt,hp,ht]
+        · simp [rideParcel,rideTruck,u,setAt,he])
+    have hcr : rideCredit r s A = rideCredit r u A := rfl
+    refine ⟨A,anch,?_⟩
+    change tab.value (rideView r s A) + rideCredit r u A ≤
+      serviceCount (.unload p t a) + 3*sailCount (.unload p t a) +
+        tab.value (rideView r u A) + rideCredit r s A
+    rw [← hvw,← hcr]
+    simp [serviceCount,sailCount]
+
+theorem ride_table_trace (r : RideSpec w) (C : Nat) (tab : RideTable w r C)
+    (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {d x f : Nat}
+    (counts : TraceCounts w tr d x f) (v : CarrierInvariant w s)
+    (A : Nat → Fin (r.size+1)) (anch : RideAnchored r s A) :
+    ∃ B, RideAnchored r u B ∧
+      tab.value (rideView r s A) + rideCredit r u B ≤
+        x+3*f+tab.value (rideView r u B)+rideCredit r s A := by
+  induction counts generalizing A with
+  | nil s => exact ⟨A,anch,by omega⟩
+  | @cons s u' u a b m h st tail act d x f lab rest ih =>
+    obtain ⟨B,hB,h1⟩ := ride_table_step r C tab cap lab v A anch
+    obtain ⟨D,hD,h2⟩ := ih (step_carrier_invariant w st v) B hB
+    exact ⟨D,hD,by omega⟩
+
+def rideAboardCount (w : World) (s : State) : Nat :=
+  sumN (fun t => match s.truck t with | .land _ => 0 | .onFerry _ => 1) w.trucks
+
+def rideEstimate (r : RideSpec w) (C : Nat) (tab : RideTable w r C) (s : State) : Nat :=
+  tab.value (rideView r s (rideInitial r s)) - rideAboardCount w s
+
+theorem stock_ride_admissible (r : RideSpec w) (C : Nat) (tab : RideTable w r C)
+    (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {d x f : Nat}
+    (counts : TraceCounts w tr d x f) (v : CarrierInvariant w s) (done : Goal w u) :
+    rideEstimate r C tab s ≤ x+3*f := by
+  obtain ⟨B,_,hb⟩ := ride_table_trace r C tab cap counts v (rideInitial r s)
+    (by unfold RideAnchored; intro f hf hz; rfl)
+  have hg : tab.value (rideView r u B) = 0 := by
+    apply tab.goal
+    intro p
+    simp [rideView,rideParcel,done p.val p.isLt]
+  have hc := ride_initial_credit r s v
+  change rideCredit r s (rideInitial r s) = rideAboardCount w s at hc
+  rw [hg,hc] at hb
+  unfold rideEstimate
+  omega
+
+theorem stock_ride_road_partition (r : RideSpec w) (C : Nat) (tab : RideTable w r C)
+    (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    {s u : State} {m h : Nat} {tr : LegalTrace w s u m h} {d x f roadBound : Nat}
+    (counts : TraceCounts w tr d x f) (v : CarrierInvariant w s) (done : Goal w u)
+    (rd : roadBound ≤ d) :
+    roadBound + rideEstimate r C tab s ≤ m := by
+  have hs := stock_ride_admissible r C tab cap counts v done
+  have hm := trace_count_movement w counts
+  omega
+
+#print axioms ride_table_step
+#print axioms ride_table_trace
+#print axioms stock_ride_admissible
+#print axioms stock_ride_road_partition
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Constructor primitives used by Pattern and StockRidePattern.
+-- At k=1 this is exactly the Python base case; k=0 is its natural
+-- mathematical extension, useful for proofs.
+def weakComps : Nat → Nat → List (List Nat)
+  | 0, n => if n = 0 then [[]] else []
+  | k+1, n => (List.range (n+1)).flatMap (fun a =>
+      (weakComps k (n-a)).map (fun rest => a :: rest))
+
+theorem weak_comps_complete (xs : List Nat) : xs ∈ weakComps xs.length xs.sum := by
+  induction xs with
+  | nil => simp [weakComps]
+  | cons a rest ih =>
+    simp only [List.length_cons,List.sum_cons,weakComps]
+    apply List.mem_flatMap.mpr
+    refine ⟨a,List.mem_range.mpr (by omega),?_⟩
+    apply List.mem_map.mpr
+    refine ⟨rest,?_,rfl⟩
+    have he : a+rest.sum-a = rest.sum := by omega
+    simpa [he] using ih
+
+theorem weak_comps_sound (k n : Nat) (xs : List Nat)
+    (h : xs ∈ weakComps k n) : xs.length = k ∧ xs.sum = n := by
+  induction k generalizing n xs with
+  | zero =>
+    by_cases he : n = 0
+    · simp [weakComps,he] at h
+      subst xs
+      simp [he]
+    · simp [weakComps,he] at h
+  | succ k ih =>
+    simp only [weakComps] at h
+    obtain ⟨a,ha,hm⟩ := List.mem_flatMap.mp h
+    obtain ⟨rest,hr,he⟩ := List.mem_map.mp hm
+    subst xs
+    have hb := List.mem_range.mp ha
+    have hi := ih (n-a) rest hr
+    simp only [List.length_cons,List.sum_cons]
+    omega
+
+inductive MixedDigits : List Nat → List Nat → Prop where
+  | nil : MixedDigits [] []
+  | cons {r d : Nat} {rs ds : List Nat} :
+      d < r → MixedDigits rs ds → MixedDigits (r::rs) (d::ds)
+
+def mixedEncode : List Nat → List Nat → Nat
+  | r::rs, d::ds => d + r*mixedEncode rs ds
+  | _, _ => 0
+
+def mixedDecode : List Nat → Nat → List Nat
+  | [], _ => []
+  | r::rs, z => z%r :: mixedDecode rs (z/r)
+
+theorem mixed_decode_encode {rs ds : List Nat} (h : MixedDigits rs ds) :
+    mixedDecode rs (mixedEncode rs ds) = ds := by
+  induction h with
+  | nil => rfl
+  | @cons r d rs ds hd valid ih =>
+    simp only [mixedEncode,mixedDecode]
+    rw [radix_head _ _ _ hd,radix_tail _ _ _ hd,ih]
+
+theorem mixed_encode_injective {rs a b : List Nat}
+    (ha : MixedDigits rs a) (hb : MixedDigits rs b)
+    (eq : mixedEncode rs a = mixedEncode rs b) : a = b := by
+  have he := congrArg (mixedDecode rs) eq
+  rw [mixed_decode_encode ha,mixed_decode_encode hb] at he
+  exact he
+
+def mixedRadixProduct : List Nat → Nat
+  | [] => 1
+  | r::rs => r*mixedRadixProduct rs
+
+theorem mixed_encode_bound {rs ds : List Nat} (h : MixedDigits rs ds) :
+    mixedEncode rs ds < mixedRadixProduct rs := by
+  induction h with
+  | nil => simp [mixedEncode,mixedRadixProduct]
+  | @cons r d rs ds hd valid ih =>
+    have hm := Nat.mul_le_mul_left r (show mixedEncode rs ds+1 ≤ mixedRadixProduct rs by omega)
+    rw [Nat.mul_add,Nat.mul_one] at hm
+    simp only [mixedEncode,mixedRadixProduct]
+    omega
+
+def histogramAt (pos : Nat → Nat) (k a : Nat) : Nat :=
+  sumN (fun i => if pos i = a then 1 else 0) k
+
+def histogramVector (pos : Nat → Nat) (k n : Nat) : List Nat :=
+  (List.range n).map (histogramAt pos k)
+
+theorem histogram_sum (pos : Nat → Nat) (k n : Nat)
+    (valid : ∀ i, i < k → pos i < n) :
+    sumN (histogramAt pos k) n = k := by
+  unfold histogramAt
+  rw [sumN_swap]
+  have h := sumN_congr
+    (fun i => sumN (fun a => if pos i = a then 1 else 0) n)
+    (fun _ => 1) k (by
+      intro i hi
+      have he := sumN_single (fun a => if pos i = a then 1 else 0) n (pos i)
+        (valid i hi) (by intro q hq hn; simp [Ne.symm hn])
+      simpa using he)
+  rw [h]
+  clear h valid
+  induction k with
+  | zero => rfl
+  | succ k ih => simp [sumN,ih]
+
+theorem histogram_composition (pos : Nat → Nat) (k n : Nat)
+    (valid : ∀ i, i < k → pos i < n) :
+    histogramVector pos k n ∈ weakComps n k := by
+  have hlen : (histogramVector pos k n).length = n := by simp [histogramVector]
+  have hsum : (histogramVector pos k n).sum = k := by
+    unfold histogramVector
+    rw [sum_range_eq_sumN,histogram_sum pos k n valid]
+  have h := weak_comps_complete (histogramVector pos k n)
+  rw [hlen,hsum] at h
+  exact h
+
+def selectedCount (sel : Nat → Bool) (k : Nat) : Nat :=
+  sumN (fun i => if sel i then 1 else 0) k
+
+def movePositions (pos : Nat → Nat) (sel : Nat → Bool) (b : Nat) : Nat → Nat :=
+  fun i => if sel i then b else pos i
+
+-- Exact arithmetic for the reversible count-vector translations in
+-- Pattern, SailingPattern and StockRidePattern. Selection cannot remove
+-- more entries from an origin than the origin actually contains.
+theorem histogram_selected_le (pos : Nat → Nat) (sel : Nat → Bool) (k a : Nat)
+    (origin : ∀ i, i < k → sel i = true → pos i = a) :
+    selectedCount sel k ≤ histogramAt pos k a := by
+  unfold selectedCount histogramAt
+  apply sumN_mono
+  intro i hi
+  cases hs : sel i
+  · simp [hs]
+  · simp [hs,origin i hi hs]
+
+theorem histogram_shift_balance (pos : Nat → Nat) (sel : Nat → Bool)
+    (k a b z : Nat) (origin : ∀ i, i < k → sel i = true → pos i = a) :
+    histogramAt (movePositions pos sel b) k z +
+      (if z = a then selectedCount sel k else 0) =
+    histogramAt pos k z + (if z = b then selectedCount sel k else 0) := by
+  induction k with
+  | zero => simp [histogramAt,selectedCount,sumN]
+  | succ k ih =>
+    have prev := ih (fun i hi hs => origin i (by omega) hs)
+    simp only [histogramAt,selectedCount,sumN] at prev ⊢
+    cases hs : sel k with
+    | false =>
+      have hmove : movePositions pos sel b k = pos k := by simp [movePositions,hs]
+      rw [hmove]
+      simp only [hs, Bool.false_eq_true, if_false, Nat.add_zero]
+      by_cases ha : z = a <;> by_cases hb : z = b <;>
+        simp only [ha,hb,if_true,if_false] at prev ⊢ <;> omega
+    | true =>
+      have hp := origin k (by omega) hs
+      have hmove : movePositions pos sel b k = b := by simp [movePositions,hs]
+      rw [hmove,hp]
+      simp only [hs, if_true]
+      by_cases ha : z = a
+      · by_cases hb : z = b
+        · simp only [if_pos ha,if_pos hb,if_pos (Eq.symm ha),if_pos (Eq.symm hb)] at prev ⊢
+          omega
+        · simp only [if_pos ha,if_neg hb,if_pos (Eq.symm ha),if_neg (Ne.symm hb)] at prev ⊢
+          omega
+      · by_cases hb : z = b
+        · simp only [if_neg ha,if_pos hb,if_neg (Ne.symm ha),if_pos (Eq.symm hb)] at prev ⊢
+          omega
+        · simp only [if_neg ha,if_neg hb,if_neg (Ne.symm ha),if_neg (Ne.symm hb)] at prev ⊢
+          omega
+
+theorem histogram_shift_exact (pos : Nat → Nat) (sel : Nat → Bool)
+    (k a b z : Nat) (origin : ∀ i, i < k → sel i = true → pos i = a) :
+    histogramAt (movePositions pos sel b) k z =
+      histogramAt pos k z - (if z = a then selectedCount sel k else 0) +
+        (if z = b then selectedCount sel k else 0) := by
+  have he := histogram_shift_balance pos sel k a b z origin
+  have hb := histogram_selected_le pos sel k a origin
+  by_cases ha : z = a
+  · subst z
+    simp only [eq_self,if_true] at he ⊢
+    omega
+  · simp only [ha,if_false] at he ⊢
+    omega
+
+#print axioms weak_comps_complete
+#print axioms weak_comps_sound
+#print axioms mixed_decode_encode
+#print axioms mixed_encode_injective
+#print axioms mixed_encode_bound
+#print axioms histogram_composition
+#print axioms histogram_shift_exact
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Temporal extraction from a concrete trace, with no assumptions about
+-- search order or pruning. Used to justify causal leaf-zone visits.
+def causalTraceLength {s u : State} {m h : Nat} :
+    LegalTrace w s u m h → Nat
+  | .nil _ => 0
+  | .cons _ tail => causalTraceLength tail + 1
+
+def causalTraceState {s u : State} {m h : Nat} :
+    LegalTrace w s u m h → Nat → State
+  | .nil s, _ => s
+  | @LegalTrace.cons _ s _ _ _ _ _ _ _ _, 0 => s
+  | .cons _ tail, i+1 => causalTraceState tail i
+
+theorem causal_trace_zero {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) :
+    causalTraceState tr 0 = s := by
+  cases tr <;> rfl
+
+theorem causal_trace_end {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) :
+    causalTraceState tr (causalTraceLength tr) = u := by
+  induction tr with
+  | nil s => rfl
+  | cons st tail ih => simpa [causalTraceLength,causalTraceState] using ih
+
+theorem causal_trace_step {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (i : Nat) (hi : i < causalTraceLength tr) :
+    ∃ a b, Step w (causalTraceState tr i) (causalTraceState tr (i+1)) a b := by
+  induction tr generalizing i with
+  | nil s => simp [causalTraceLength] at hi
+  | @cons s t u a b m h st tail ih =>
+    cases i with
+    | zero =>
+      exact ⟨a,b,by simpa [causalTraceState,causal_trace_zero] using st⟩
+    | succ i =>
+      have hb : i < causalTraceLength tail := by
+        simp [causalTraceLength] at hi
+        omega
+      exact ih i hb
+
+theorem causal_trace_valid {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (v : CarrierInvariant w s) (i : Nat) : CarrierInvariant w (causalTraceState tr i) := by
+  induction tr generalizing i with
+  | nil s => exact v
+  | @cons s t u a b m h st tail ih =>
+    cases i with
+    | zero => exact v
+    | succ i => exact ih (step_carrier_invariant w st v) i
+
+theorem bool_enter_time (atTime : Nat → Bool) (n : Nat)
+    (start : atTime 0 = false) (finish : atTime n = true) :
+    ∃ i, i < n ∧ atTime i = false ∧ atTime (i+1) = true := by
+  induction n with
+  | zero => simp [start] at finish
+  | succ n ih =>
+    cases h : atTime n with
+    | false => exact ⟨n,by omega,h,finish⟩
+    | true =>
+      obtain ⟨i,hi,ha,hb⟩ := ih h
+      exact ⟨i,by omega,ha,hb⟩
+
+def causalEntryAt (w : World) (side : Nat → Bool) {s u : State} {m h : Nat}
+    (tr : LegalTrace w s u m h) (i : Nat) : Nat :=
+  (enteringTrucks w side (causalTraceState tr i) (causalTraceState tr (i+1))).length
+
+theorem causal_entry_le (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (i : Nat) (hi : i < causalTraceLength tr) :
+    causalEntryAt w side tr i ≤ traceIn w side tr := by
+  induction tr generalizing i with
+  | nil s => simp [causalTraceLength] at hi
+  | @cons s t u a b m h st tail ih =>
+    cases i with
+    | zero =>
+      simp [causalEntryAt,causalTraceState,causal_trace_zero,traceIn]
+    | succ i =>
+      have hb : i < causalTraceLength tail := by
+        simp [causalTraceLength] at hi
+        omega
+      have h := ih i hb
+      change causalEntryAt w side tail i ≤
+        (enteringTrucks w side s t).length + traceIn w side tail
+      omega
+
+theorem causal_two_entries (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (i j : Nat) (order : i < j) (hj : j < causalTraceLength tr)
+    (ha : 0 < causalEntryAt w side tr i) (hb : 0 < causalEntryAt w side tr j) :
+    2 ≤ traceIn w side tr := by
+  induction tr generalizing i j with
+  | nil s => simp [causalTraceLength] at hj
+  | @cons s t u a b m h st tail ih =>
+    cases j with
+    | zero => omega
+    | succ j =>
+      have hj' : j < causalTraceLength tail := by
+        simp [causalTraceLength] at hj
+        omega
+      change 0 < causalEntryAt w side tail j at hb
+      cases i with
+      | zero =>
+        have ha' : 0 < (enteringTrucks w side s t).length := by
+          simpa [causalEntryAt,causalTraceState,causal_trace_zero] using ha
+        have hb' := causal_entry_le w side tail j hj'
+        simp only [traceIn]
+        omega
+      | succ i =>
+        change 0 < causalEntryAt w side tail i at ha
+        have h := ih i j (by omega) hj' ha hb
+        simp only [traceIn]
+        omega
+
+theorem causal_unique_entry_time (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (one : traceIn w side tr ≤ 1) (i j : Nat)
+    (hi : i < causalTraceLength tr) (hj : j < causalTraceLength tr)
+    (ha : 0 < causalEntryAt w side tr i) (hb : 0 < causalEntryAt w side tr j) :
+    i = j := by
+  by_cases he : i = j
+  · exact he
+  · rcases Nat.lt_or_gt_of_ne he with h | h
+    · have h2 := causal_two_entries w side tr i j h hj ha hb
+      omega
+    · have h2 := causal_two_entries w side tr j i h hi hb ha
+      omega
+
+theorem causal_entry_positive (w : World) (side : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (i t : Nat) (ht : t < w.trucks)
+    (before : side (physicalTruck (causalTraceState tr i) t) = false)
+    (after : side (physicalTruck (causalTraceState tr (i+1)) t) = true) :
+    0 < causalEntryAt w side tr i := by
+  have hm : t ∈ enteringTrucks w side (causalTraceState tr i)
+      (causalTraceState tr (i+1)) := by
+    simp [enteringTrucks,ht,before,after]
+  unfold causalEntryAt
+  cases he : enteringTrucks w side (causalTraceState tr i) (causalTraceState tr (i+1)) with
+  | nil => simp [he] at hm
+  | cons x xs => simp
+
+-- For any two disjoint work cuts A,B with no truck initially in A,
+-- a parcel going from A to B witnesses a truck entry into A strictly
+-- before a truck entry into B. This extracts the ordering from all six
+-- actual Step constructors, including arbitrary transshipment.
+theorem causal_demand_order (w : World) (A B : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (v : CarrierInvariant w s) (p : Nat) (hp : p < w.parcels)
+    (noTruck : ∀ t, t < w.trucks → A (physicalTruck s t) = false)
+    (disj : ∀ x, A x = true → B x = false)
+    (source : A (physicalParcel s p) = true)
+    (target : B (physicalParcel u p) = true) :
+    ∃ i j, i < j ∧ j < causalTraceLength tr ∧
+      0 < causalEntryAt w A tr i ∧ 0 < causalEntryAt w B tr j := by
+  let PA := fun i => A (physicalParcel (causalTraceState tr i) p)
+  let PB := fun i => B (physicalParcel (causalTraceState tr i) p)
+  have hb0 : PB 0 = false := by
+    simpa [PB,causal_trace_zero] using disj _ source
+  have hbn : PB (causalTraceLength tr) = true := by
+    simpa [PB,causal_trace_end] using target
+  obtain ⟨j,hj,hbo,hbi⟩ := bool_enter_time PB (causalTraceLength tr) hb0 hbn
+  have ha0 : (!PA 0) = false := by simp [PA,causal_trace_zero,source]
+  have hax : PA (j+1) = false := by
+    cases he : PA (j+1) with
+    | false => rfl
+    | true =>
+      have hd := disj (physicalParcel (causalTraceState tr (j+1)) p) he
+      change B (physicalParcel (causalTraceState tr (j+1)) p) = true at hbi
+      rw [hbi] at hd
+      contradiction
+  obtain ⟨k,hk,hko,hki⟩ := bool_enter_time (fun i => !PA i) (j+1) ha0 (by simp [hax])
+  have hka : A (physicalParcel (causalTraceState tr k) p) = true := by
+    change (!A (physicalParcel (causalTraceState tr k) p)) = false at hko
+    simpa using hko
+  have hkb : A (physicalParcel (causalTraceState tr (k+1)) p) = false := by
+    change (!A (physicalParcel (causalTraceState tr (k+1)) p)) = true at hki
+    simpa using hki
+  obtain ⟨a,b,step⟩ := causal_trace_step tr k (by omega)
+  have vk := causal_trace_valid tr v k
+  obtain ⟨t,ht,hpt,_⟩ := parcel_side_change_carrier w A step vk.parcels p hp
+    (by rw [hka,hkb]; decide)
+  have hat : A (physicalTruck (causalTraceState tr k) t) = true := by
+    simpa [physicalParcel,hpt] using hka
+  have haInit : A (physicalTruck (causalTraceState tr 0) t) = false := by
+    simpa [causal_trace_zero] using noTruck t ht
+  obtain ⟨i,hi,hio,hii⟩ := bool_enter_time
+    (fun i => A (physicalTruck (causalTraceState tr i) t)) k haInit hat
+  have haEntry := causal_entry_positive w A tr i t ht hio hii
+  obtain ⟨c,d,bstep⟩ := causal_trace_step tr j hj
+  have vj := causal_trace_valid tr v j
+  have hbo' : B (physicalParcel (causalTraceState tr j) p) = false := hbo
+  have hbi' : B (physicalParcel (causalTraceState tr (j+1)) p) = true := hbi
+  have he := (entering_parcel_owner w B bstep vj.parcels p hp hbo' hbi').1
+  have hbEntry : 0 < causalEntryAt w B tr j := by
+    unfold causalEntryAt
+    cases h : enteringTrucks w B (causalTraceState tr j) (causalTraceState tr (j+1)) with
+    | nil => simp [h] at he
+    | cons x xs => simp
+  exact ⟨i,j,by omega,hj,haEntry,hbEntry⟩
+
+theorem causal_single_entry_order (w : World) (A B : Nat → Bool)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (v : CarrierInvariant w s) (p : Nat) (hp : p < w.parcels)
+    (noTruck : ∀ t, t < w.trucks → A (physicalTruck s t) = false)
+    (disj : ∀ x, A x = true → B x = false)
+    (source : A (physicalParcel s p) = true) (target : B (physicalParcel u p) = true)
+    (oneA : traceIn w A tr ≤ 1) (oneB : traceIn w B tr ≤ 1)
+    (i j : Nat) (hi : i < causalTraceLength tr) (hj : j < causalTraceLength tr)
+    (ha : 0 < causalEntryAt w A tr i) (hb : 0 < causalEntryAt w B tr j) : i < j := by
+  obtain ⟨a,b,hab,hbtime,hentryA,hentryB⟩ :=
+    causal_demand_order w A B tr v p hp noTruck disj source target
+  have haeq := causal_unique_entry_time w A tr oneA i a hi (by omega) ha hentryA
+  have hbeq := causal_unique_entry_time w B tr oneB j b hj hbtime hb hentryB
+  omega
+
+-- A strictly increasing entry-time ranking rules out every nonempty
+-- directed demand cycle. Removing all multi-entry zones yields a DAG.
+inductive DemandWalk (edge : Nat → Nat → Prop) : Nat → Nat → Nat → Prop where
+  | nil (a : Nat) : DemandWalk edge a a 0
+  | cons {a b c k : Nat} : edge a b → DemandWalk edge b c k → DemandWalk edge a c (k+1)
+
+theorem demand_walk_rank (edge : Nat → Nat → Prop) (rank : Nat → Nat)
+    (monotone : ∀ a b, edge a b → rank a < rank b)
+    {a b k : Nat} (walk : DemandWalk edge a b k) : rank a+k ≤ rank b := by
+  induction walk with
+  | nil a => simp
+  | cons he rest ih =>
+    have h := monotone _ _ he
+    omega
+
+theorem demand_rank_no_cycle (edge : Nat → Nat → Prop) (rank : Nat → Nat)
+    (monotone : ∀ a b, edge a b → rank a < rank b)
+    {a k : Nat} (walk : DemandWalk edge a a k) : k = 0 := by
+  have h := demand_walk_rank edge rank monotone walk
+  omega
+
+#print axioms causal_trace_step
+#print axioms causal_unique_entry_time
+#print axioms causal_demand_order
+#print axioms causal_single_entry_order
+#print axioms demand_rank_no_cycle
+
+end IslandLogistics
+
+namespace IslandLogistics
+
+-- Retire isolated empty ports into fixed ports served by all the same
+-- usable ferries.  Ferries with zero slots are left at their initial
+-- positions: they can sail but can never carry a truck.
+structure PortRetractionSpec (w : World) where
+  loc : Nat → Nat
+  bound : ∀ a, a < w.locations → loc a < w.locations
+  road : ∀ a b, w.road a b → loc a = a ∧ loc b = b
+  route : ∀ f a, f < w.ferries → 0 < w.slots f →
+    w.route f a → w.route f (loc a)
+  goal : ∀ p, p < w.parcels → loc (w.goal p) = w.goal p
+  idem : ∀ a, loc (loc a) = loc a
+
+def portRetTruck (r : Nat → Nat) : TruckPosition → TruckPosition
+  | .land a => .land (r a)
+  | .onFerry f => .onFerry f
+
+def portRetParcel (r : Nat → Nat) : ParcelPosition → ParcelPosition
+  | .ground a => .ground (r a)
+  | .onTruck t => .onTruck t
+
+def portRetState {w : World} (r : PortRetractionSpec w) (base s : State) : State :=
+  ⟨fun t => portRetTruck r.loc (s.truck t),
+   fun f => if 0 < w.slots f then r.loc (s.ferry f) else base.ferry f,
+   fun p => portRetParcel r.loc (s.parcel p)⟩
+
+theorem port_ret_map_setAt {α β : Type} (m : α → β) (f : Nat → α)
+    (i : Nat) (v : α) :
+    (fun j => m (setAt f i v j)) = setAt (fun j => m (f j)) i (m v) := by
+  funext j
+  by_cases he : j = i <;> simp [setAt,he]
+
+theorem port_ret_truck_update {w : World} (r : PortRetractionSpec w)
+    (base s : State) (t : Nat) (p : TruckPosition) :
+    portRetState r base {s with truck := setAt s.truck t p} =
+      {portRetState r base s with truck := setAt (portRetState r base s).truck t (portRetTruck r.loc p)} := by
+  simp only [portRetState,port_ret_map_setAt]
+
+theorem port_ret_parcel_update {w : World} (r : PortRetractionSpec w)
+    (base s : State) (p : Nat) (v : ParcelPosition) :
+    portRetState r base {s with parcel := setAt s.parcel p v} =
+      {portRetState r base s with parcel := setAt (portRetState r base s).parcel p (portRetParcel r.loc v)} := by
+  simp only [portRetState,port_ret_map_setAt]
+
+theorem port_ret_ferry_update {w : World} (r : PortRetractionSpec w)
+    (base s : State) (f b : Nat) :
+    portRetState r base {s with ferry := setAt s.ferry f b} =
+      {portRetState r base s with ferry := setAt (portRetState r base s).ferry f (if 0 < w.slots f then r.loc b else base.ferry f)} := by
+  simp only [portRetState, State.mk.injEq, true_and, and_true]
+  funext g
+  by_cases he : g = f
+  · subst g; simp [setAt]
+  · simp [setAt,he]
+
+theorem port_ret_load {w : World} (r : PortRetractionSpec w)
+    (base s : State) (t : Nat) :
+    load w (portRetState r base s) t = load w s t := by
+  unfold load
+  apply sumN_congr
+  intro p hp
+  cases he : s.parcel p <;> simp [portRetState,portRetParcel,he]
+
+theorem port_ret_occupancy {w : World} (r : PortRetractionSpec w)
+    (base s : State) (f : Nat) :
+    occupancy w (portRetState r base s) f = occupancy w s f := by
+  unfold occupancy
+  apply sumN_congr
+  intro t ht
+  cases he : s.truck t <;> simp [portRetState,portRetTruck,he]
+
+theorem port_ret_idem {w : World} (r : PortRetractionSpec w) (base s : State) :
+    portRetState r base (portRetState r base s) = portRetState r base s := by
+  simp only [portRetState,State.mk.injEq]
+  refine ⟨?_,?_,?_⟩
+  · funext t
+    cases he : s.truck t <;> simp [portRetTruck,he,r.idem]
+  · funext f
+    by_cases hs : 0 < w.slots f <;> simp [hs,r.idem]
+  · funext p
+    cases he : s.parcel p <;> simp [portRetParcel,he,r.idem]
+
+theorem port_ret_step {w : World} (r : PortRetractionSpec w) (base : State)
+    {s u : State} {m h : Nat} (st : Step w s u m h) (v : CarrierInvariant w s) :
+    (portRetState r base s = portRetState r base u ∧ h = 0) ∨
+      Step w (portRetState r base s) (portRetState r base u) m h := by
+  cases st with
+  | drive t a b ht hr hv =>
+    right
+    rw [port_ret_truck_update]
+    have ha := r.road a b hr
+    apply Step.drive (portRetState r base s) t (r.loc a) (r.loc b)
+    · simp [portRetState,portRetTruck,ht]
+    · simpa only [ha.1,ha.2] using hr
+    · exact ⟨hv.1,r.bound a hv.2.1,r.bound b hv.2.2⟩
+  | board t f a ht hf hr room hv =>
+    right
+    rw [port_ret_truck_update]
+    have hs : 0 < w.slots f := by omega
+    apply Step.board (portRetState r base s) t f (r.loc a)
+    · simp [portRetState,portRetTruck,ht]
+    · simp [portRetState,hs,hf]
+    · exact r.route f a hv.2.1 hs hr
+    · rw [port_ret_occupancy]; exact room
+    · exact ⟨hv.1,hv.2.1,r.bound a hv.2.2⟩
+  | disembark t f ht hv =>
+    right
+    rw [port_ret_truck_update]
+    have hs := (v.trucks t hv.1 f ht).2
+    have hd := Step.disembark (w := w) (portRetState r base s) t f
+      (by simp [portRetState,portRetTruck,ht]) hv
+    simpa [portRetState,portRetTruck,hs] using hd
+  | sail f b hr hne hv =>
+    rw [port_ret_ferry_update]
+    by_cases hs : 0 < w.slots f
+    · simp only [hs,if_true]
+      by_cases he : r.loc (s.ferry f) = r.loc b
+      · left
+        have hx : r.loc b = (portRetState r base s).ferry f := by
+          simp [portRetState,hs,he]
+        rw [hx,setAt_current]
+        exact ⟨rfl,True.intro⟩
+      · right
+        apply Step.sail (portRetState r base s) f (r.loc b)
+        · exact r.route f b hv.1 hs hr
+        · simpa [portRetState,hs] using he
+        · exact ⟨hv.1,r.bound b hv.2⟩
+    · left
+      simp only [hs,if_false]
+      have hx : base.ferry f = (portRetState r base s).ferry f := by
+        simp [portRetState,hs]
+      rw [hx,setAt_current]
+      exact ⟨rfl,True.intro⟩
+  | load p t a hp ht room hv =>
+    right
+    rw [port_ret_parcel_update]
+    apply Step.load (portRetState r base s) p t (r.loc a)
+    · simp [portRetState,portRetParcel,hp]
+    · simp [portRetState,portRetTruck,ht]
+    · rw [port_ret_load]; exact room
+    · exact ⟨hv.1,hv.2.1,r.bound a hv.2.2⟩
+  | unload p t a hp ht hv =>
+    right
+    rw [port_ret_parcel_update]
+    apply Step.unload (portRetState r base s) p t (r.loc a)
+    · simp [portRetState,portRetParcel,hp]
+    · simp [portRetState,portRetTruck,ht]
+    · exact ⟨hv.1,hv.2.1,r.bound a hv.2.2⟩
+
+def PortRestrictedStep {w : World} (r : PortRetractionSpec w) (base : State)
+    (s u : State) (m h : Nat) : Prop :=
+  Step w s u m h ∧ portRetState r base s = s ∧ portRetState r base u = u
+
+theorem port_ret_path {w : World} (r : PortRetractionSpec w) (base : State)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h)
+    (v : CarrierInvariant w s) :
+    ∃ m', m' ≤ m ∧
+      Path (PortRestrictedStep r base) (portRetState r base s) (portRetState r base u) m' h := by
+  induction path with
+  | nil s => exact ⟨0,by omega,Path.nil _⟩
+  | @cons s t u a b m h st tail ih =>
+    obtain ⟨d,hd,hp⟩ := ih (step_carrier_invariant w st v)
+    rcases port_ret_step r base st v with ⟨he,hb⟩ | hm
+    · subst b
+      rw [← he] at hp
+      exact ⟨d,by omega,by simpa only [Nat.zero_add] using hp⟩
+    · exact ⟨a+d,by omega,Path.cons
+        ⟨hm,port_ret_idem r base s,port_ret_idem r base t⟩ hp⟩
+
+theorem port_ret_goal {w : World} (r : PortRetractionSpec w) (base s : State)
+    (hg : Goal w s) : Goal w (portRetState r base s) := by
+  intro p hp
+  simp [portRetState,portRetParcel,hg p hp,r.goal p hp]
+
+theorem port_ret_preserves_optimal_witness {w : World} (r : PortRetractionSpec w)
+    (base : State) (fixed : portRetState r base base = base)
+    {u : State} {m h : Nat} (path : Path (Step w) base u m h)
+    (v : CarrierInvariant w base) (hg : Goal w u) :
+    ∃ t m', Goal w t ∧ m' ≤ m ∧ Path (PortRestrictedStep r base) base t m' h := by
+  obtain ⟨d,hd,hp⟩ := port_ret_path r base path v
+  rw [fixed] at hp
+  exact ⟨portRetState r base u,d,port_ret_goal r base u hg,hd,hp⟩
+
+#print axioms port_ret_step
+#print axioms port_ret_path
+#print axioms port_ret_preserves_optimal_witness
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- A finite minimum, without an oracle or a finite sentinel.
+theorem closure_nat_min (P : Nat → Prop) (n : Nat) (hn : P n) :
+    ∃ k, P k ∧ ∀ j, P j → k ≤ j := by
+  classical
+  induction n using Nat.strongRecOn with
+  | ind n ih =>
+    by_cases h : ∃ j, j < n ∧ P j
+    · obtain ⟨j,hj,hp⟩ := h
+      exact ih j hj hp
+    · exact ⟨n,hn,fun j hj => by
+        by_cases he : j < n
+        · exact False.elim (h ⟨j,he,hj⟩)
+        · omega⟩
+
+def closureFullMask (m : Nat) : Nat := 2^m-1
+
+theorem closure_full_bit (m i : Nat) :
+    (closureFullMask m).testBit i = decide (i<m) := by
+  unfold closureFullMask
+  rw [Nat.testBit_two_pow_sub_one]
+
+theorem closure_mask_nonzero (mask : Nat) (hn : mask ≠ 0) :
+    ∃ i, mask.testBit i = true := by
+  classical
+  by_cases he : ∃ i, mask.testBit i = true
+  · exact he
+  · apply False.elim
+    apply hn
+    apply Nat.eq_of_testBit_eq
+    intro i
+    cases hb : mask.testBit i
+    · simp [hb]
+    · exact False.elim (he ⟨i,hb⟩)
+
+theorem closure_remove_bit (mask i : Nat) (hi : mask.testBit i = true) :
+    maskWithin (mask ^^^ 2^i) mask ∧ mask ^^^ 2^i < mask := by
+  have sub : maskWithin (mask ^^^ 2^i) mask := by
+    intro j hj
+    by_cases he : j = i
+    · subst j; simp [Nat.testBit_xor,Nat.testBit_two_pow,hi] at hj
+    · simpa [Nat.testBit_xor,Nat.testBit_two_pow,Ne.symm he] using hj
+  have le := Nat.le_of_testBit sub
+  have neq : mask ^^^ 2^i ≠ mask := by
+    intro he
+    have h := congrArg (fun n : Nat => n.testBit i) he
+    simp [Nat.testBit_xor,Nat.testBit_two_pow,hi] at h
+  exact ⟨sub,by omega⟩
+
+theorem closure_add_bit (mask i : Nat) (hi : mask.testBit i = false) :
+    maskWithin mask (mask ||| 2^i) ∧ mask < mask ||| 2^i := by
+  have sub : maskWithin mask (mask ||| 2^i) := by
+    intro j hj
+    simp [Nat.testBit_or,hj]
+  have le := Nat.le_of_testBit sub
+  have neq : mask ≠ mask ||| 2^i := by
+    intro he
+    have h := congrArg (fun n : Nat => n.testBit i) he
+    simp [Nat.testBit_or,Nat.testBit_two_pow,hi] at h
+  exact ⟨sub,by omega⟩
+
+-- This is the Boolean recurrence in causal_choices: the empty graph is
+-- acyclic, and a nonempty mask can be peeled at a vertex with no incoming
+-- demand from that mask. Its evaluation order is justified by remove_bit.
+def FeedbackRecurrence (edge : Nat → Nat → Prop) (m : Nat)
+    (ok : Nat → Bool) : Prop :=
+  ok 0 = true ∧ ∀ mask, maskWithin mask (closureFullMask m) →
+    mask ≠ 0 → (ok mask = true ↔
+      ∃ i, mask.testBit i = true ∧
+        (∀ j, mask.testBit j = true → ¬ edge j i) ∧
+        ok (mask ^^^ 2^i) = true)
+
+theorem feedback_rank_accepted (edge : Nat → Nat → Prop) (m : Nat)
+    (ok : Nat → Bool) (recurrence : FeedbackRecurrence edge m ok)
+    (mask : Nat) (valid : maskWithin mask (closureFullMask m))
+    (rank : Nat → Nat)
+    (ranked : ∀ a b, mask.testBit a = true → mask.testBit b = true →
+      edge a b → rank a < rank b) : ok mask = true := by
+  classical
+  induction mask using Nat.strongRecOn with
+  | ind mask ih =>
+    by_cases he : mask = 0
+    · simpa [he] using recurrence.1
+    · obtain ⟨v,hv⟩ := closure_mask_nonzero mask he
+      obtain ⟨r,⟨i,hi,hr⟩,hmin⟩ :=
+        closure_nat_min (fun r => ∃ i, mask.testBit i = true ∧ rank i = r)
+          (rank v) ⟨v,hv,rfl⟩
+      have source : ∀ j, mask.testBit j = true → ¬ edge j i := by
+        intro j hj hedge
+        have h1 := ranked j i hj hi hedge
+        have h2 := hmin (rank j) ⟨j,hj,rfl⟩
+        omega
+      obtain ⟨sub,lt⟩ := closure_remove_bit mask i hi
+      have accepted := ih _ lt (maskWithin_trans sub valid)
+        (fun a b ha hb e => ranked a b (sub a ha) (sub b hb) e)
+      exact (recurrence.2 mask valid he).mpr ⟨i,hi,source,accepted⟩
+
+-- If there is a ranked (single-entry) set, extend it to a maximal
+-- accepted kept mask. The complement is one of Python's inclusion-
+-- minimal feedback masks. All removed bits were already outside the
+-- actual single-entry set; hence every forced repeated entry is real.
+theorem feedback_maximal_kept (m : Nat) (ok : Nat → Bool) (single : Nat)
+    (valid : maskWithin single (closureFullMask m)) (accepted : ok single = true) :
+    ∃ kept, maskWithin single kept ∧ maskWithin kept (closureFullMask m) ∧
+      ok kept = true ∧
+      ∀ i, i < m → kept.testBit i = false → ok (kept ||| 2^i) ≠ true := by
+  classical
+  let full := closureFullMask m
+  let P := fun n => ∃ k, maskWithin single k ∧ maskWithin k full ∧
+    ok k = true ∧ n = full-k
+  obtain ⟨n,⟨kept,sub,bounded,hok,hn⟩,hmin⟩ :=
+    closure_nat_min P (full-single) ⟨single,maskWithin_refl _,valid,accepted,rfl⟩
+  refine ⟨kept,sub,bounded,hok,?_⟩
+  intro i hi hbit hnew
+  obtain ⟨hin,hlt⟩ := closure_add_bit kept i hbit
+  have hb : maskWithin (kept ||| 2^i) full := by
+    intro j hj
+    by_cases he : j = i
+    · subst j
+      simp [full,closure_full_bit,hi]
+    · have hj' : kept.testBit j = true := by
+        simpa [Nat.testBit_or,Nat.testBit_two_pow,Ne.symm he] using hj
+      exact bounded j hj'
+  have hle := Nat.le_of_testBit hb
+  have hm := hmin (full-(kept ||| 2^i))
+    ⟨kept ||| 2^i,maskWithin_trans sub hin,hb,hnew,rfl⟩
+  omega
+
+-- For each non-repeated zone pick any one of its cuts with one entry.
+-- The chronological witness then proves the rank condition for the
+-- actual dependency graph even when different zones pick different cuts.
+theorem causal_feedback_from_trace (w : World)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (v : CarrierInvariant w s) (zones single : Nat) (edge : Nat → Nat → Prop)
+    (ok : Nat → Bool) (recurrence : FeedbackRecurrence edge zones ok)
+    (valid : maskWithin single (closureFullMask zones))
+    (side : Nat → Nat → Bool) (entry : Nat → Nat)
+    (noTruck : ∀ a, single.testBit a = true → ∀ t, t < w.trucks →
+      side a (physicalTruck s t) = false)
+    (one : ∀ a, single.testBit a = true → traceIn w (side a) tr ≤ 1)
+    (event : ∀ a, single.testBit a = true →
+      entry a < causalTraceLength tr ∧ 0 < causalEntryAt w (side a) tr (entry a))
+    (disj : ∀ a b, single.testBit a = true → single.testBit b = true → edge a b →
+      ∀ x, side a x = true → side b x = false)
+    (job : ∀ a b, single.testBit a = true → single.testBit b = true → edge a b →
+      ∃ p, p < w.parcels ∧ side a (physicalParcel s p) = true ∧
+        side b (physicalParcel u p) = true) :
+    ∃ kept, maskWithin single kept ∧ maskWithin kept (closureFullMask zones) ∧
+      ok kept = true ∧
+      ∀ i, i < zones → kept.testBit i = false → ok (kept ||| 2^i) ≠ true := by
+  have ranked : ∀ a b, single.testBit a = true → single.testBit b = true →
+      edge a b → entry a < entry b := by
+    intro a b ha hb he
+    obtain ⟨p,hp,hsrc,hdst⟩ := job a b ha hb he
+    exact causal_single_entry_order w (side a) (side b) tr v p hp
+      (noTruck a ha) (disj a b ha hb he) hsrc hdst (one a ha) (one b hb)
+      (entry a) (entry b) (event a ha).1 (event b hb).1 (event a ha).2 (event b hb).2
+  exact feedback_maximal_kept zones ok single valid
+    (feedback_rank_accepted edge zones ok recurrence single valid entry ranked)
+
+-- Cache proof: a key only needs to preserve the value, not the entire
+-- state. A hit, a miss, eviction and replacement preserve correctness.
+def KeyFactors {S K V : Type} (key : S → K) (eval : S → V) : Prop :=
+  ∀ s t, key s = key t → eval s = eval t
+
+def KeyCacheOK {S K V : Type} (key : S → K) (eval : S → V)
+    (cache : K → Option V) : Prop :=
+  ∀ s v, cache (key s) = some v → v = eval s
+
+def keyCacheGet {S K V : Type} (key : S → K) (eval : S → V)
+    (cache : K → Option V) (s : S) : V :=
+  (cache (key s)).getD (eval s)
+
+theorem key_cache_get {S K V : Type} (key : S → K) (eval : S → V)
+    (cache : K → Option V) (ok : KeyCacheOK key eval cache) (s : S) :
+    keyCacheGet key eval cache s = eval s := by
+  unfold keyCacheGet
+  cases h : cache (key s)
+  · rfl
+  · exact ok s _ h
+
+theorem key_cache_insert {S K V : Type} [DecidableEq K] (key : S → K) (eval : S → V)
+    (cache : K → Option V) (ok : KeyCacheOK key eval cache)
+    (factors : KeyFactors key eval) (s : S) :
+    KeyCacheOK key eval (fun k => if k = key s then some (eval s) else cache k) := by
+  intro t v hv
+  by_cases he : key t = key s
+  · simp [he] at hv
+    exact hv.symm.trans (factors t s he).symm
+  · simp [he] at hv
+    exact ok t v hv
+
+theorem key_cache_evict {S K V : Type} (key : S → K) (eval : S → V)
+    (cache : K → Option V) (ok : KeyCacheOK key eval cache) (keep : K → Bool) :
+    KeyCacheOK key eval (fun k => if keep k then cache k else none) := by
+  intro s v hv
+  cases he : keep (key s)
+  · simp [he] at hv
+  · exact ok s v (by simpa [he] using hv)
+
+theorem key_factors_projection {S K V : Type} (key : S → K) (f : K → V) :
+    KeyFactors key (fun s => f (key s)) := by
+  intro s t he
+  exact congrArg f he
+
+-- The distinction between an admissible evaluator and safe pruning:
+-- d is the true remaining cost on the solvable quotient.  Each expanded
+-- non-goal must generate some optimal child. If an equal key was already
+-- expanded at a smaller g, the invariant covers that child as closed.
+-- This theorem deliberately does not assume consistency of h.
+theorem astar_frontier_witness {S : Type}
+    (d : S → Nat) (isGoal : S → Prop)
+    (openNode closedNode : S → Nat → Prop)
+    (closedNotGoal : ∀ s g, closedNode s g → ¬ isGoal s)
+    (zeroGoal : ∀ s, d s = 0 → isGoal s)
+    (expand : ∀ s g, closedNode s g → ¬ isGoal s →
+      ∃ t c g', 0 < c ∧ d s = c+d t ∧ g' ≤ g+c ∧
+        (openNode t g' ∨ closedNode t g'))
+    (s : S) (g : Nat) (covered : openNode s g ∨ closedNode s g) :
+    ∃ t k, openNode t k ∧ k+d t ≤ g+d s := by
+  have aux : ∀ rem s g, d s = rem → (openNode s g ∨ closedNode s g) →
+      ∃ t k, openNode t k ∧ k+d t ≤ g+rem := by
+    intro rem
+    induction rem using Nat.strongRecOn with
+    | ind rem ih =>
+      intro s g hrem hc
+      rcases hc with ho | hclosed
+      · exact ⟨s,g,ho,by omega⟩
+      · have hn := closedNotGoal s g hclosed
+        have hp : 0 < d s := by
+          by_cases he : d s = 0
+          · exact False.elim (hn (zeroGoal s he))
+          · omega
+        obtain ⟨t,c,k,hc,he,hk,ht⟩ := expand s g hclosed hn
+        have hlt : d t < rem := by omega
+        obtain ⟨u,l,hu,hl⟩ := ih (d t) hlt t k rfl ht
+        exact ⟨u,l,hu,by omega⟩
+  exact aux (d s) s g rfl covered
+
+theorem astar_goal_pop_optimal {S : Type}
+    (d h : S → Nat) (isGoal : S → Prop)
+    (openNode closedNode : S → Nat → Prop)
+    (closedNotGoal : ∀ s g, closedNode s g → ¬ isGoal s)
+    (zeroGoal : ∀ s, d s = 0 → isGoal s)
+    (expand : ∀ s g, closedNode s g → ¬ isGoal s →
+      ∃ t c g', 0 < c ∧ d s = c+d t ∧ g' ≤ g+c ∧
+        (openNode t g' ∨ closedNode t g'))
+    (initial popped : S) (cost : Nat)
+    (covered : openNode initial 0 ∨ closedNode initial 0)
+    (admissible : ∀ s g, openNode s g → h s ≤ d s)
+    (priorityMin : ∀ s g, openNode s g → cost+h popped ≤ g+h s)
+    (lower : d initial ≤ cost) : cost = d initial := by
+  obtain ⟨t,k,ho,ht⟩ := astar_frontier_witness d isGoal openNode closedNode
+    closedNotGoal zeroGoal expand initial 0 covered
+  have hb := admissible t k ho
+  have hp := priorityMin t k ho
+  omega
+
+#print axioms feedback_rank_accepted
+#print axioms feedback_maximal_kept
+#print axioms causal_feedback_from_trace
+#print axioms key_cache_get
+#print axioms key_cache_insert
+#print axioms key_cache_evict
+#print axioms astar_frontier_witness
+#print axioms astar_goal_pop_optimal
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- A common shadow semantics for ALL usable ferries, including ferries
+-- carrying several trucks which boarded at different ports.
+def effectiveTruck (s : State) (anchor : Nat → Nat) (t : Nat) : Nat :=
+  match s.truck t with
+  | .land a => a
+  | .onFerry _ => anchor t
+
+def effectiveParcel (s : State) (anchor : Nat → Nat) (p : Nat) : Nat :=
+  match s.parcel p with
+  | .ground a => a
+  | .onTruck t => effectiveTruck s anchor t
+
+def effectiveNext (anchor : Nat → Nat) (a : ActionLabel) : Nat → Nat :=
+  match a with
+  | .board t _ x => setAt anchor t x
+  | _ => anchor
+
+def EffectiveAnchors (w : World) (s : State) (anchor : Nat → Nat) : Prop :=
+  ∀ t f, t < w.trucks → s.truck t = .onFerry f → w.route f (anchor t)
+
+theorem effective_initial (w : World) (s : State) (v : CarrierInvariant w s) :
+    EffectiveAnchors w s (physicalTruck s) := by
+  intro t f ht hf
+  have hb := v.trucks t ht f hf
+  simpa [physicalTruck,hf] using v.ferries f hb.1
+
+theorem effective_initial_parcel (s : State) (p : Nat) :
+    effectiveParcel s (physicalTruck s) p = physicalParcel s p := by
+  cases hp : s.parcel p with
+  | ground a => simp [effectiveParcel,physicalParcel,hp]
+  | onTruck t =>
+    cases ht : s.truck t <;> simp [effectiveParcel,physicalParcel,effectiveTruck,physicalTruck,hp,ht]
+
+theorem effective_anchor_step (w : World) {s u : State} {a : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u a m h) (A : Nat → Nat) (v : EffectiveAnchors w s A) :
+    EffectiveAnchors w u (effectiveNext A a) := by
+  cases st with
+  | drive t a b ht hr hv =>
+    intro q f hq hf
+    by_cases he : q = t
+    · subst q; simp [setAt] at hf
+    · exact v q f hq (by simpa [setAt,he] using hf)
+  | board t f a ht hf hr room hv =>
+    intro q g hq hg
+    by_cases he : q = t
+    · subst q
+      have hgf : f = g := by simpa [setAt] using hg
+      subst g
+      simpa [effectiveNext,setAt] using hr
+    · have hs : s.truck q = .onFerry g := by simpa [setAt,he] using hg
+      simpa [effectiveNext,setAt,he] using v q g hq hs
+  | disembark t f ht hv =>
+    intro q g hq hg
+    by_cases he : q = t
+    · subst q; simp [setAt] at hg
+    · exact v q g hq (by simpa [setAt,he] using hg)
+  | sail f b hr hn hv => exact v
+  | load p t a hp ht room hv => exact v
+  | unload p t a hp ht hv => exact v
+
+-- One parcel's projected move is either a real DRIVE, or one complete
+-- occupied ride ending in a real DISEMBARK. It is never one move per
+-- intermediate SAIL. The source-state load supplies the capacity witness.
+inductive EffectiveParcelLeg (w : World) (s : State) (p : Nat) :
+    ActionLabel → Nat → Nat → Prop where
+  | road (t a b : Nat) : t < w.trucks → s.parcel p = .onTruck t →
+      w.road a b → EffectiveParcelLeg w s p (.drive t a b) a b
+  | ride (t f a b : Nat) : t < w.trucks → f < w.ferries →
+      s.parcel p = .onTruck t → s.truck t = .onFerry f →
+      w.route f a → w.route f b → b = s.ferry f →
+      EffectiveParcelLeg w s p (.disembark t f) a b
+
+theorem effective_parcel_step (w : World) {s u : State} {a : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u a m h) (A : Nat → Nat)
+    (anch : EffectiveAnchors w s A) (v : CarrierInvariant w s) (p : Nat) :
+    effectiveParcel s A p = effectiveParcel u (effectiveNext A a) p ∨
+      EffectiveParcelLeg w s p a (effectiveParcel s A p)
+        (effectiveParcel u (effectiveNext A a) p) := by
+  cases st with
+  | drive t a b ht hr hv =>
+    cases hp : s.parcel p with
+    | ground x => exact Or.inl (by simp [effectiveParcel,effectiveNext,hp])
+    | onTruck q =>
+      by_cases he : q = t
+      · subst q
+        exact Or.inr (by
+          simpa [effectiveParcel,effectiveTruck,effectiveNext,hp,ht,setAt] using
+            (EffectiveParcelLeg.road (w := w) (s := s) (p := p) t a b hv.1 hp hr))
+      · left; simp [effectiveParcel,effectiveTruck,effectiveNext,hp,setAt,he]
+  | board t f a ht hf hr room hv =>
+    left
+    cases hp : s.parcel p with
+    | ground x => simp [effectiveParcel,effectiveNext,hp]
+    | onTruck q =>
+      by_cases he : q = t
+      · subst q; simp [effectiveParcel,effectiveTruck,effectiveNext,hp,ht,setAt]
+      · cases hq : s.truck q <;>
+          simp [effectiveParcel,effectiveTruck,effectiveNext,hp,hq,setAt,he]
+  | disembark t f ht hv =>
+    cases hp : s.parcel p with
+    | ground x => exact Or.inl (by simp [effectiveParcel,effectiveNext,hp])
+    | onTruck q =>
+      by_cases he : q = t
+      · subst q
+        have h1 := anch t f hv.1 ht
+        have h2 := v.ferries f hv.2
+        exact Or.inr (by
+          simpa [effectiveParcel,effectiveTruck,effectiveNext,hp,ht,setAt] using
+            (EffectiveParcelLeg.ride (w := w) (s := s) (p := p) t f (A t) (s.ferry f)
+              hv.1 hv.2 hp ht h1 h2 rfl))
+      · left; simp [effectiveParcel,effectiveTruck,effectiveNext,hp,setAt,he]
+  | sail f b hr hn hv => exact Or.inl rfl
+  | load q t a hq ht room hv =>
+    left
+    by_cases he : p = q
+    · subst p; simp [effectiveParcel,effectiveTruck,effectiveNext,hq,ht,setAt]
+    · simp [effectiveParcel,effectiveTruck,effectiveNext,setAt,he]
+  | unload q t a hq ht hv =>
+    left
+    by_cases he : p = q
+    · subst p; simp [effectiveParcel,effectiveTruck,effectiveNext,hq,ht,setAt]
+    · simp [effectiveParcel,effectiveTruck,effectiveNext,setAt,he]
+
+-- This finite graph contains every physical road and every usable
+-- port-to-fleet-hub edge. Fleet grouping may identify several ferries.
+structure HubGraphCertificate (w : World) where
+  edges : List (Nat × Nat)
+  hub : Nat → Nat
+  road : ∀ a b, w.road a b → (a,b) ∈ edges
+  outward : ∀ f a, f < w.ferries → 0 < w.slots f → w.route f a →
+    (a,hub f) ∈ edges
+  inward : ∀ f a, f < w.ferries → 0 < w.slots f → w.route f a →
+    (hub f,a) ∈ edges
+
+theorem effective_leg_hub_walk (w : World) (g : HubGraphCertificate w)
+    {s : State} {p : Nat} {act : ActionLabel} {a b : Nat}
+    (leg : EffectiveParcelLeg w s p act a b) (v : CarrierInvariant w s) :
+    ∃ walk, PassengerWalk g.edges a b walk := by
+  cases leg with
+  | road t a b ht hp hr =>
+    exact ⟨[(a,b)],PassengerWalk.cons (g.road a b hr) (PassengerWalk.nil b)⟩
+  | ride t f a b ht hf hp htruck hfrom hto hport =>
+    have hs := (v.trucks t ht f htruck).2
+    exact ⟨[(a,g.hub f),(g.hub f,b)],
+      PassengerWalk.cons (g.outward f a hf hs hfrom)
+        (PassengerWalk.cons (g.inward f b hf hs hto) (PassengerWalk.nil b))⟩
+
+theorem effective_walk_append (edges : List (Nat × Nat))
+    {a b c : Nat} {xs ys : List (Nat × Nat)}
+    (p : PassengerWalk edges a b xs) (q : PassengerWalk edges b c ys) :
+    PassengerWalk edges a c (xs++ys) := by
+  induction p with
+  | nil a => exact q
+  | cons he rest ih => exact PassengerWalk.cons he (ih q)
+
+-- Every legal completion supplies a common anchored trace. For each
+-- parcel it yields a concrete directed hub walk. Loop erasure then gives
+-- the simple path enumerated by the HubFlow constructor.
+theorem effective_trace_hub_walk (w : World) (g : HubGraphCertificate w)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (v : CarrierInvariant w s) (A : Nat → Nat)
+    (anch : EffectiveAnchors w s A) :
+    ∃ B, EffectiveAnchors w u B ∧ ∀ p, ∃ walk,
+      PassengerWalk g.edges (effectiveParcel s A p) (effectiveParcel u B p) walk := by
+  induction tr generalizing A with
+  | nil s =>
+    exact ⟨A,anch,fun p => ⟨[],PassengerWalk.nil _⟩⟩
+  | @cons s t u a b m h st tail ih =>
+    obtain ⟨act,lab⟩ := label_step_complete w st
+    have hA := effective_anchor_step w lab A anch
+    obtain ⟨B,hB,walks⟩ := ih (step_carrier_invariant w st v) (effectiveNext A act) hA
+    refine ⟨B,hB,?_⟩
+    intro p
+    obtain ⟨tailwalk,htail⟩ := walks p
+    rcases effective_parcel_step w lab A anch v p with he | leg
+    · exact ⟨tailwalk,by rw [he]; exact htail⟩
+    · obtain ⟨headwalk,hhead⟩ := effective_leg_hub_walk w g leg v
+      exact ⟨headwalk++tailwalk,effective_walk_append g.edges hhead htail⟩
+
+theorem hub_actual_simple_path (w : World) (g : HubGraphCertificate w)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h)
+    (v : CarrierInvariant w s) (done : Goal w u) (p : Nat) (hp : p < w.parcels) :
+    ∃ walk simple, PassengerWalk g.edges (physicalParcel s p) (w.goal p) walk ∧
+      HubSimplePath g.edges (physicalParcel s p) (w.goal p) simple ∧
+      ∀ e ∈ simple, e ∈ walk := by
+  obtain ⟨B,_,all⟩ := effective_trace_hub_walk w g tr v (physicalTruck s)
+    (effective_initial w s v)
+  obtain ⟨walk,hwalk⟩ := all p
+  rw [effective_initial_parcel] at hwalk
+  have he : effectiveParcel u B p = w.goal p := by simp [effectiveParcel,done p hp]
+  rw [he] at hwalk
+  obtain ⟨simple,hs,sub⟩ := hub_loop_erase g.edges hwalk
+  exact ⟨walk,simple,hwalk,hs,sub⟩
+
+#print axioms effective_anchor_step
+#print axioms effective_parcel_step
+#print axioms effective_trace_hub_walk
+#print axioms hub_actual_simple_path
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Each completed ride from a to b, a≠b, must pay once at its departure
+-- port and once at its arrival port. Credits are per truck (not per
+-- ferry), allowing many passengers with different anchors.
+def effectivePortCredit (out : Bool) (f port : Nat)
+    (s : State) (A : Nat → Nat) (t : Nat) : Nat :=
+  if s.truck t = .onFerry f ∧ A t ≠ s.ferry f ∧
+    (if out then A t = port else s.ferry f = port) then 1 else 0
+
+def effectivePortSpend (out : Bool) (f port : Nat)
+    (s : State) (A : Nat → Nat) (act : ActionLabel) (t : Nat) : Nat :=
+  match act with
+  | .disembark q g => if q = t ∧ g = f then effectivePortCredit out f port s A t else 0
+  | _ => 0
+
+def effectivePortMint (out : Bool) (f port : Nat)
+    (s : State) (act : ActionLabel) (t : Nat) : Nat :=
+  match act with
+  | .sail g b => if g = f ∧ s.truck t = .onFerry f ∧
+      (if out then s.ferry f = port else b = port) then 1 else 0
+  | _ => 0
+
+theorem effective_port_local (w : World) {s u : State} {act : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u act m h) (out : Bool) (f port t : Nat)
+    (A : Nat → Nat) :
+    effectivePortSpend out f port s A act t +
+      effectivePortCredit out f port u (effectiveNext A act) t ≤
+    effectivePortMint out f port s act t + effectivePortCredit out f port s A t := by
+  cases st with
+  | drive q a b hq hr hv =>
+    by_cases he : t = q
+    · subst t
+      simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hq]
+    · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,he]
+  | board q g a hq hg hr room hv =>
+    by_cases he : t = q
+    · subst t
+      by_cases hgf : g = f
+      · subst g
+        simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hq,hg]
+      · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hq,hgf]
+    · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,he]
+  | disembark q g hq hv =>
+    by_cases he : t = q
+    · subst t
+      by_cases hgf : g = f
+      · subst g
+        simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hq]
+      · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hq,hgf]
+    · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,he,Ne.symm he]
+  | sail g b hr hn hv =>
+    by_cases hgf : g = f
+    · subst g
+      by_cases hpass : s.truck t = .onFerry f
+      · cases out with
+        | false =>
+          by_cases hb : b = port <;>
+            simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hpass,hb] <;>
+            split <;> omega
+        | true =>
+          by_cases hA : A t = port
+          · by_cases hfrom : s.ferry f = port
+            · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hpass,hA,hfrom]
+              split <;> omega
+            · have hdiff : A t ≠ s.ferry f := by omega
+              simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hpass,hA,hfrom,Ne.symm hfrom,hdiff]
+              split <;> omega
+          · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hpass,hA]
+      · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,hpass]
+    · simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext,setAt,hgf,Ne.symm hgf]
+  | load q t' a hq ht room hv => simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext]
+  | unload q t' a hq ht hv => simp [effectivePortSpend,effectivePortMint,effectivePortCredit,effectiveNext]
+
+def portCreditSum (w : World) (out : Bool) (f port : Nat)
+    (s : State) (A : Nat → Nat) : Nat :=
+  sumN (effectivePortCredit out f port s A) w.trucks
+
+def portSpendSum (w : World) (out : Bool) (f port : Nat)
+    (s : State) (A : Nat → Nat) (act : ActionLabel) : Nat :=
+  sumN (effectivePortSpend out f port s A act) w.trucks
+
+def portSailAllowance (w : World) (out : Bool) (f port : Nat)
+    (s : State) (act : ActionLabel) : Nat :=
+  match act with
+  | .sail g b => if g = f ∧ (if out then s.ferry f = port else b = port)
+      then w.slots f else 0
+  | _ => 0
+
+theorem effective_mint_bound (w : World) {s u : State} {act : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u act m h) (v : ValidFerryOccupancy w s)
+    (out : Bool) (f port : Nat) :
+    sumN (effectivePortMint out f port s act) w.trucks ≤
+      portSailAllowance w out f port s act := by
+  cases st with
+  | sail g b hr hn hv =>
+    by_cases he : g = f ∧ (if out then s.ferry f = port else b = port)
+    · have hm : sumN (effectivePortMint out f port s (.sail g b)) w.trucks =
+          occupancy w s f := by
+        unfold occupancy
+        apply sumN_congr
+        intro t ht
+        simp [effectivePortMint,he.1,he.2]
+      rw [hm]
+      have hf : f < w.ferries := by omega
+      simpa [portSailAllowance,he] using v f hf
+    · have hz : sumN (effectivePortMint out f port s (.sail g b)) w.trucks = 0 := by
+        rw [sumN_congr _ (fun _ => 0) _ (by
+          intro t ht
+          have hh : ¬ (g = f ∧ s.truck t = .onFerry f ∧
+              (if out then s.ferry f = port else b = port)) := by
+            intro hh
+            exact he ⟨hh.1,hh.2.2⟩
+          simp only [effectivePortMint,if_neg hh]),sumN_zero]
+      rw [hz]
+      exact Nat.zero_le _
+  | drive =>
+    change sumN (fun _ => 0) w.trucks ≤ 0
+    simp [sumN_zero]
+  | board =>
+    change sumN (fun _ => 0) w.trucks ≤ 0
+    simp [sumN_zero]
+  | disembark =>
+    change sumN (fun _ => 0) w.trucks ≤ 0
+    simp [sumN_zero]
+  | load =>
+    change sumN (fun _ => 0) w.trucks ≤ 0
+    simp [sumN_zero]
+  | unload =>
+    change sumN (fun _ => 0) w.trucks ≤ 0
+    simp [sumN_zero]
+
+theorem effective_port_step_budget (w : World) {s u : State} {act : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u act m h) (v : ValidFerryOccupancy w s)
+    (out : Bool) (f port : Nat) (A : Nat → Nat) :
+    portSpendSum w out f port s A act +
+      portCreditSum w out f port u (effectiveNext A act) ≤
+    portSailAllowance w out f port s act + portCreditSum w out f port s A := by
+  have hs := sumN_mono
+    (fun t => effectivePortSpend out f port s A act t +
+      effectivePortCredit out f port u (effectiveNext A act) t)
+    (fun t => effectivePortMint out f port s act t +
+      effectivePortCredit out f port s A t) w.trucks
+    (fun t _ => effective_port_local w st out f port t A)
+  rw [sumN_add,sumN_add] at hs
+  have hb := effective_mint_bound w st v out f port
+  unfold portSpendSum portCreditSum
+  omega
+
+theorem effective_port_initial_zero (w : World) (out : Bool) (f port : Nat) (s : State) :
+    portCreditSum w out f port s (physicalTruck s) = 0 := by
+  unfold portCreditSum
+  rw [sumN_congr _ (fun _ => 0) _ (by
+    intro t ht
+    by_cases he : s.truck t = .onFerry f
+    · simp [effectivePortCredit,physicalTruck,he]
+    · simp [effectivePortCredit,he]),sumN_zero]
+
+-- Record the actual labels and anchors; no independent per-port choice
+-- of a path is made. Every port budget refers to this SAME legal trace.
+structure EffectiveEvent where
+  source : State
+  anchor : Nat → Nat
+  action : ActionLabel
+
+inductive EffectiveTrace (w : World) :
+    State → (Nat → Nat) → State → (Nat → Nat) → List EffectiveEvent → Nat → Nat → Prop where
+  | nil (s : State) (A : Nat → Nat) : EffectiveTrace w s A s A [] 0 0
+  | cons {s t u : State} {A B : Nat → Nat} {act : ActionLabel}
+      {xs : List EffectiveEvent} {a b m h : Nat} :
+      LabelStep w s t act a b →
+      EffectiveTrace w t (effectiveNext A act) u B xs m h →
+      EffectiveTrace w s A u B (⟨s,A,act⟩::xs) (a+m) (b+h)
+
+theorem effective_trace_exists (w : World)
+    {s u : State} {m h : Nat} (tr : LegalTrace w s u m h) (A : Nat → Nat) :
+    ∃ B xs, EffectiveTrace w s A u B xs m h := by
+  induction tr generalizing A with
+  | nil s => exact ⟨A,[],EffectiveTrace.nil s A⟩
+  | cons st tail ih =>
+    obtain ⟨act,lab⟩ := label_step_complete w st
+    obtain ⟨B,xs,ht⟩ := ih (effectiveNext A act)
+    exact ⟨B,_,EffectiveTrace.cons lab ht⟩
+
+theorem effective_trace_port_budget (w : World)
+    {s u : State} {A B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s A u B xs m h) (v : CarrierInvariant w s)
+    (out : Bool) (f port : Nat) :
+    (xs.map (fun e => portSpendSum w out f port e.source e.anchor e.action)).sum +
+      portCreditSum w out f port u B ≤
+    (xs.map (fun e => portSailAllowance w out f port e.source e.action)).sum +
+      portCreditSum w out f port s A := by
+  induction tr with
+  | nil s A => simp
+  | @cons s t u A B act xs a b m h st rest ih =>
+    have h1 := effective_port_step_budget w st v.occupancy out f port A
+    have h2 := ih (step_carrier_invariant w (label_step_sound w st) v)
+    simp only [List.map_cons,List.sum_cons]
+    omega
+
+theorem effective_completed_port_budget (w : World)
+    {s u : State} {B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s (physicalTruck s) u B xs m h)
+    (v : CarrierInvariant w s) (out : Bool) (f port : Nat) :
+    (xs.map (fun e => portSpendSum w out f port e.source e.anchor e.action)).sum ≤
+    (xs.map (fun e => portSailAllowance w out f port e.source e.action)).sum := by
+  have h := effective_trace_port_budget w tr v out f port
+  rw [effective_port_initial_zero] at h
+  omega
+
+#print axioms effective_port_local
+#print axioms effective_mint_bound
+#print axioms effective_port_step_budget
+#print axioms effective_trace_exists
+#print axioms effective_completed_port_budget
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Concrete arc witnesses retain the exact event that carried each
+-- parcel. A ride returning to its anchor contributes no hub arcs.
+def eventHubArcs (g : HubGraphCertificate w) (e : EffectiveEvent) : List (Nat × Nat) :=
+  match e.action with
+  | .drive _ a b => [(a,b)]
+  | .disembark t f =>
+    if e.anchor t = e.source.ferry f then []
+    else [(e.anchor t,g.hub f),(g.hub f,e.source.ferry f)]
+  | _ => []
+
+def eventCarrier (e : EffectiveEvent) : Nat :=
+  match e.action with
+  | .drive t _ _ | .disembark t _ => t
+  | _ => 0
+
+def eventHasCargo (e : EffectiveEvent) (p : Nat) : Bool :=
+  decide (e.source.parcel p = .onTruck (eventCarrier e))
+
+theorem event_leg_walk (w : World) (g : HubGraphCertificate w)
+    {s : State} {p : Nat} {act : ActionLabel} {a b : Nat}
+    (leg : EffectiveParcelLeg w s p act a b) (v : CarrierInvariant w s)
+    (A : Nat → Nat)
+    (fromAnchor : ∀ t f, act = .disembark t f → a = A t) :
+    ∃ walk, PassengerWalk g.edges a b walk ∧
+      ∀ arc ∈ walk, arc ∈ eventHubArcs g ⟨s,A,act⟩ ∧
+        eventHasCargo ⟨s,A,act⟩ p = true := by
+  cases leg with
+  | road t a b ht hp hr =>
+    refine ⟨[(a,b)],PassengerWalk.cons (g.road a b hr) (PassengerWalk.nil b),?_⟩
+    intro arc hm
+    simp at hm
+    subst arc
+    simp [eventHubArcs,eventHasCargo,eventCarrier,hp]
+  | ride t f a b ht hf hp htruck hfrom hto hport =>
+    have ha := fromAnchor t f rfl
+    have hs := (v.trucks t ht f htruck).2
+    by_cases he : a = b
+    · exact ⟨[],by rw [← he]; exact PassengerWalk.nil _,by simp⟩
+    · refine ⟨[(a,g.hub f),(g.hub f,b)],
+        PassengerWalk.cons (g.outward f a hf hs hfrom)
+          (PassengerWalk.cons (g.inward f b hf hs hto) (PassengerWalk.nil b)),?_⟩
+      intro arc hm
+      constructor
+      · simpa [eventHubArcs,← ha,← hport,he] using hm
+      · simp [eventHasCargo,eventCarrier,hp]
+
+theorem effective_trace_event_walk (w : World) (g : HubGraphCertificate w)
+    {s u : State} {A B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s A u B xs m h)
+    (v : CarrierInvariant w s) (anch : EffectiveAnchors w s A) (p : Nat) :
+    ∃ walk, PassengerWalk g.edges (effectiveParcel s A p) (effectiveParcel u B p) walk ∧
+      ∀ arc ∈ walk, ∃ e ∈ xs, arc ∈ eventHubArcs g e ∧ eventHasCargo e p = true := by
+  induction tr with
+  | nil s A => exact ⟨[],PassengerWalk.nil _,by simp⟩
+  | @cons s t u A B act xs a b m h st rest ih =>
+    have v' := step_carrier_invariant w (label_step_sound w st) v
+    have anch' := effective_anchor_step w st A anch
+    obtain ⟨tw,htw,hw⟩ := ih v' anch'
+    rcases effective_parcel_step w st A anch v p with he | leg
+    · refine ⟨tw,by rw [he]; exact htw,?_⟩
+      intro arc ha
+      obtain ⟨e,hm,hx,hc⟩ := hw arc ha
+      exact ⟨e,List.mem_cons_of_mem _ hm,hx,hc⟩
+    · have hanchor : ∀ q f, act = .disembark q f →
+          effectiveParcel s A p = A q := by
+        intro q f he
+        have inv : ∀ {ac x y}, EffectiveParcelLeg w s p ac x y →
+            ac = .disembark q f →
+            s.parcel p = .onTruck q ∧ s.truck q = .onFerry f := by
+          intro ac x y lg hact
+          cases lg with
+          | road t x y ht hp hr => cases hact
+          | ride t g x y ht hg hp htruck hfrom hto hport =>
+            cases hact
+            exact ⟨hp,htruck⟩
+        obtain ⟨hp,htruck⟩ := inv leg he
+        simp [effectiveParcel,effectiveTruck,hp,htruck]
+      obtain ⟨hd,hhd,hh⟩ := event_leg_walk w g leg v A hanchor
+      refine ⟨hd++tw,effective_walk_append g.edges hhd htw,?_⟩
+      intro arc ha
+      rcases List.mem_append.mp ha with ha | ha
+      · obtain ⟨hx,hc⟩ := hh arc ha
+        exact ⟨⟨s,A,act⟩,by simp,hx,hc⟩
+      · obtain ⟨e,hm,hx,hc⟩ := hw arc ha
+        exact ⟨e,List.mem_cons_of_mem _ hm,hx,hc⟩
+
+theorem hub_simple_event_witness (w : World) (g : HubGraphCertificate w)
+    {s u : State} {B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s (physicalTruck s) u B xs m h)
+    (v : CarrierInvariant w s) (done : Goal w u) (p : Nat) (hp : p < w.parcels) :
+    ∃ path, HubSimplePath g.edges (physicalParcel s p) (w.goal p) path ∧
+      ∀ arc ∈ path, ∃ e ∈ xs, arc ∈ eventHubArcs g e ∧ eventHasCargo e p = true := by
+  obtain ⟨walk,hw,huses⟩ := effective_trace_event_walk w g tr v (effective_initial w s v) p
+  rw [effective_initial_parcel] at hw
+  have he : effectiveParcel u B p = w.goal p := by simp [effectiveParcel,done p hp]
+  rw [he] at hw
+  obtain ⟨path,hp',sub⟩ := hub_loop_erase g.edges hw
+  exact ⟨path,hp',fun arc ha => huses arc (sub arc ha)⟩
+
+theorem effective_event_capacity (w : World) (g : HubGraphCertificate w)
+    {s u : State} {A B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s A u B xs m h)
+    (v : CarrierInvariant w s) (C : Nat)
+    (cap : ∀ t, t < w.trucks → w.capacity t ≤ C) :
+    ∀ e ∈ xs, ∀ arc ∈ eventHubArcs g e, load w e.source (eventCarrier e) ≤ C := by
+  induction tr with
+  | nil s A => simp
+  | @cons s t u A B act xs a b m h st rest ih =>
+    intro e hm arc ha
+    rcases List.mem_cons.mp hm with he | ht
+    · subst e
+      cases st with
+      | drive q x y hq hr hv => exact Nat.le_trans (v.loads q hv.1) (cap q hv.1)
+      | board => simp [eventHubArcs] at ha
+      | disembark q f hq hv => exact Nat.le_trans (v.loads q hv.1) (cap q hv.1)
+      | sail => simp [eventHubArcs] at ha
+      | load => simp [eventHubArcs] at ha
+      | unload => simp [eventHubArcs] at ha
+    · exact ih (step_carrier_invariant w (label_step_sound w st) v) e ht arc ha
+
+-- One bucket per real event using the arc. Assign a parcel to the first
+-- such event carrying it; removing it from later buckets prevents
+-- duplicate weight when its real trace visits the arc several times.
+def hubEventGroups (w : World) :
+    List EffectiveEvent → (Nat → Bool) → List (List Nat)
+  | [], _ => []
+  | e::es, sel =>
+    selectedWeights w (fun p => sel p && eventHasCargo e p) ::
+    hubEventGroups w es (fun p => sel p && !eventHasCargo e p)
+
+theorem hub_event_groups_length (w : World) (es : List EffectiveEvent) (sel : Nat → Bool) :
+    (hubEventGroups w es sel).length = es.length := by
+  induction es generalizing sel with
+  | nil => rfl
+  | cons e es ih => simp [hubEventGroups,ih]
+
+theorem hub_event_groups_perm (w : World) (es : List EffectiveEvent) (sel : Nat → Bool)
+    (cover : ∀ p, p < w.parcels → sel p = true →
+      ∃ e ∈ es, eventHasCargo e p = true) :
+    List.Perm (selectedWeights w sel) (hubEventGroups w es sel).flatten := by
+  induction es generalizing sel with
+  | nil =>
+    have hz : ∀ p, p < w.parcels → sel p = false := by
+      intro p hp
+      cases he : sel p
+      · rfl
+      · obtain ⟨e,hm,_⟩ := cover p hp he
+        simp at hm
+    simp [hubEventGroups,selectedWeight_empty w sel hz]
+  | cons e es ih =>
+    have hc : ∀ p, p < w.parcels → (sel p && !eventHasCargo e p) = true →
+        ∃ e' ∈ es, eventHasCargo e' p = true := by
+      intro p hp h
+      have hs : sel p = true ∧ eventHasCargo e p = false := by simpa using h
+      obtain ⟨e',hm,hp'⟩ := cover p hp hs.1
+      rcases List.mem_cons.mp hm with eq | hm
+      · subst e'; simp [hs.2] at hp'
+      · exact ⟨e',hm,hp'⟩
+    have hsplit := selectedWeight_split w sel (eventHasCargo e)
+    have hrest := ih (fun p => sel p && !eventHasCargo e p) hc
+    exact hsplit.trans (List.Perm.append_left _ hrest)
+
+theorem hub_event_groups_fit (w : World) (es : List EffectiveEvent)
+    (sel : Nat → Bool) (C : Nat)
+    (fits : ∀ e ∈ es, load w e.source (eventCarrier e) ≤ C) :
+    ∀ group ∈ hubEventGroups w es sel, group.sum ≤ C := by
+  induction es generalizing sel with
+  | nil => simp [hubEventGroups]
+  | cons e es ih =>
+    intro group hm
+    simp only [hubEventGroups,List.mem_cons] at hm
+    rcases hm with eq | hm
+    · subst group
+      have h := selectedWeight_carrier_le w e.source (eventCarrier e)
+        (fun p => sel p && eventHasCargo e p) (by
+          intro p hp hs
+          have hc : eventHasCargo e p = true := by
+            cases hh : eventHasCargo e p <;> simp [hh] at hs ⊢
+          simpa [eventHasCargo] using hc)
+      exact Nat.le_trans h (fits e (by simp))
+    · exact ih _ (fun z hz => fits z (List.mem_cons_of_mem _ hz)) group hm
+
+theorem hub_arc_bin_from_real_trace (w : World) (g : HubGraphCertificate w)
+    {s u : State} {B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s (physicalTruck s) u B xs m h)
+    (v : CarrierInvariant w s) (C : Nat) (cap : ∀ t, t < w.trucks → w.capacity t ≤ C)
+    (seed : BinState) (arc : Nat × Nat) (sel : Nat → Bool)
+    (witness : ∀ p, p < w.parcels → sel p = true →
+      ∃ e ∈ xs, arc ∈ eventHubArcs g e ∧ eventHasCargo e p = true) :
+    (binDP C seed (selectedWeights w sel).length (selectedWeights w sel)).1 ≤
+      (xs.filter (fun e => (eventHubArcs g e).contains arc)).length := by
+  let es := xs.filter (fun e => (eventHubArcs g e).contains arc)
+  have cover : ∀ p, p < w.parcels → sel p = true →
+      ∃ e ∈ es, eventHasCargo e p = true := by
+    intro p hp hs
+    obtain ⟨e,hm,ha,hc⟩ := witness p hp hs
+    exact ⟨e,List.mem_filter.mpr ⟨hm,by simpa using ha⟩,hc⟩
+  have fits : ∀ e ∈ es, load w e.source (eventCarrier e) ≤ C := by
+    intro e he
+    obtain ⟨hm,ha⟩ := List.mem_filter.mp he
+    exact effective_event_capacity w g tr v C cap e hm arc (by simpa using ha)
+  have hb := binDP_le_feasible_groups C seed _ _
+    (hub_event_groups_perm w es sel cover) (hub_event_groups_fit w es sel C fits)
+  rw [hub_event_groups_length] at hb
+  exact hb
+
+#print axioms hub_simple_event_witness
+#print axioms effective_event_capacity
+#print axioms hub_event_groups_perm
+#print axioms hub_arc_bin_from_real_trace
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Class-preserving label permutations, in the current bounded World/Step
+-- semantics (not the historical proof model).
+structure IndexRename (n : Nat) where
+  old : Nat → Nat
+  new : Nat → Nat
+  old_new : ∀ i, old (new i) = i
+  new_old : ∀ i, new (old i) = i
+  old_perm : ((List.range n).map old).Perm (List.range n)
+
+theorem ir_new_eq {n : Nat} (r : IndexRename n) (i j : Nat) :
+    r.new i = j ↔ i = r.old j := by
+  constructor
+  · intro h
+    have hh := congrArg r.old h
+    simpa only [r.old_new] using hh
+  · intro h
+    rw [h,r.new_old]
+
+theorem ir_old_eq {n : Nat} (r : IndexRename n) (i j : Nat) :
+    r.old i = j ↔ i = r.new j := by
+  constructor
+  · intro h
+    have hh := congrArg r.new h
+    simpa only [r.new_old] using hh
+  · intro h
+    rw [h,r.old_new]
+
+def IndexRename.inverse {n : Nat} (r : IndexRename n) : IndexRename n where
+  old := r.new
+  new := r.old
+  old_new := r.new_old
+  new_old := r.old_new
+  old_perm := by
+    have hh := r.old_perm.map r.new
+    rw [List.map_map] at hh
+    have he : r.new ∘ r.old = id := by
+      funext i
+      exact r.new_old i
+    rw [he,List.map_id] at hh
+    exact hh.symm
+
+theorem ir_old_bound {n : Nat} (r : IndexRename n) {i : Nat} (hi : i < n) :
+    r.old i < n := by
+  apply List.mem_range.mp
+  exact r.old_perm.mem_iff.mp (List.mem_map.mpr ⟨i,List.mem_range.mpr hi,rfl⟩)
+
+theorem ir_new_bound {n : Nat} (r : IndexRename n) {i : Nat} (hi : i < n) :
+    r.new i < n := ir_old_bound r.inverse hi
+
+theorem ir_setAt {n : Nat} (r : IndexRename n) {α β : Type}
+    (fn : α → β) (s : Nat → α) (k : Nat) (v : α) :
+    (fun i => fn (setAt s k v (r.old i))) =
+      setAt (fun i => fn (s (r.old i))) (r.new k) (fn v) := by
+  funext i
+  simp only [setAt,ir_old_eq]
+  split <;> rfl
+
+theorem ir_perm_sum {xs ys : List Nat} (h : xs.Perm ys) : xs.sum = ys.sum := by
+  induction h with
+  | nil => rfl
+  | cons x h ih => simp [ih]
+  | swap x y l => simp [Nat.add_comm,Nat.add_left_comm]
+  | trans h₁ h₂ i₁ i₂ => exact i₁.trans i₂
+
+theorem ir_sum {n : Nat} (r : IndexRename n) (fn : Nat → Nat) :
+    sumN (fun i => fn (r.old i)) n = sumN fn n := by
+  have hh := ir_perm_sum (r.old_perm.map fn)
+  rw [List.map_map] at hh
+  simpa [sum_range_eq_sumN,Function.comp_def] using hh
+
+structure WorldRename (w : World) where
+  tr : IndexRename w.trucks
+  fe : IndexRename w.ferries
+  pa : IndexRename w.parcels
+  capacity : ∀ i, w.capacity i = w.capacity (tr.old i)
+  weight : ∀ i, w.weight i = w.weight (pa.old i)
+  destination : ∀ i, w.goal i = w.goal (pa.old i)
+  slots : ∀ i, w.slots i = w.slots (fe.old i)
+  serves : ∀ i a, w.route i a ↔ w.route (fe.old i) a
+
+def wrTruck (r : WorldRename w) : TruckPosition → TruckPosition
+  | .land a => .land a
+  | .onFerry f => .onFerry (r.fe.new f)
+
+def wrParcel (r : WorldRename w) : ParcelPosition → ParcelPosition
+  | .ground a => .ground a
+  | .onTruck t => .onTruck (r.tr.new t)
+
+def wrState (r : WorldRename w) (s : State) : State :=
+  ⟨fun t => wrTruck r (s.truck (r.tr.old t)),
+   fun f => s.ferry (r.fe.old f),
+   fun p => wrParcel r (s.parcel (r.pa.old p))⟩
+
+theorem wr_carrier (r : WorldRename w) (v : ParcelPosition) (t : Nat) :
+    wrParcel r v = .onTruck t ↔ v = .onTruck (r.tr.old t) := by
+  cases v <;> simp [wrParcel,ir_new_eq]
+
+theorem wr_passenger (r : WorldRename w) (v : TruckPosition) (f : Nat) :
+    wrTruck r v = .onFerry f ↔ v = .onFerry (r.fe.old f) := by
+  cases v <;> simp [wrTruck,ir_new_eq]
+
+theorem wr_load (r : WorldRename w) (s : State) (t : Nat) :
+    load w (wrState r s) t = load w s (r.tr.old t) := by
+  unfold load
+  let fn := fun p => if s.parcel p = .onTruck (r.tr.old t) then w.weight p else 0
+  change sumN (fun p => if wrParcel r (s.parcel (r.pa.old p)) = .onTruck t
+    then w.weight p else 0) w.parcels = sumN fn w.parcels
+  simp only [wr_carrier]
+  have hf : (fun p => if s.parcel (r.pa.old p) = .onTruck (r.tr.old t)
+    then w.weight p else 0) = (fun p => fn (r.pa.old p)) := by
+    funext p
+    dsimp [fn]
+    rw [r.weight p]
+  rw [hf]
+  exact ir_sum r.pa fn
+
+theorem wr_occupancy (r : WorldRename w) (s : State) (f : Nat) :
+    occupancy w (wrState r s) f = occupancy w s (r.fe.old f) := by
+  unfold occupancy
+  let fn := fun t => if s.truck t = .onFerry (r.fe.old f) then 1 else 0
+  change sumN (fun t => if wrTruck r (s.truck (r.tr.old t)) = .onFerry f then 1 else 0)
+    w.trucks = sumN fn w.trucks
+  simp only [wr_passenger]
+  exact ir_sum r.tr fn
+
+theorem wr_truck_update (r : WorldRename w) (s : State) (t : Nat) (v : TruckPosition) :
+    wrState r {s with truck := setAt s.truck t v} =
+      {wrState r s with truck := setAt (wrState r s).truck (r.tr.new t) (wrTruck r v)} := by
+  simp only [wrState,ir_setAt]
+
+theorem wr_parcel_update (r : WorldRename w) (s : State) (p : Nat) (v : ParcelPosition) :
+    wrState r {s with parcel := setAt s.parcel p v} =
+      {wrState r s with parcel := setAt (wrState r s).parcel (r.pa.new p) (wrParcel r v)} := by
+  simp only [wrState,ir_setAt]
+
+theorem wr_ferry_update (r : WorldRename w) (s : State) (f a : Nat) :
+    wrState r {s with ferry := setAt s.ferry f a} =
+      {wrState r s with ferry := setAt (wrState r s).ferry (r.fe.new f) a} := by
+  have hh := ir_setAt r.fe (fun x : Nat => x) s.ferry f a
+  simp only [wrState]
+  exact congrArg (fun z => State.mk (fun t => wrTruck r (s.truck (r.tr.old t))) z
+    (fun p => wrParcel r (s.parcel (r.pa.old p)))) hh
+
+theorem wr_step (r : WorldRename w) {s u : State} {m h : Nat} (st : Step w s u m h) :
+    Step w (wrState r s) (wrState r u) m h := by
+  cases st with
+  | drive t a b ht hr hv =>
+    rw [wr_truck_update]
+    exact Step.drive _ (r.tr.new t) a b
+      (by simp [wrState,wrTruck,r.tr.old_new,ht]) hr
+      ⟨ir_new_bound r.tr hv.1,hv.2⟩
+  | board t f a ht hf hr room hv =>
+    rw [wr_truck_update]
+    exact Step.board _ (r.tr.new t) (r.fe.new f) a
+      (by simp [wrState,wrTruck,r.tr.old_new,ht])
+      (by simp [wrState,r.fe.old_new,hf])
+      ((r.serves _ _).mpr (by simpa only [r.fe.old_new] using hr))
+      (by rw [wr_occupancy,r.slots,r.fe.old_new]; exact room)
+      ⟨ir_new_bound r.tr hv.1,ir_new_bound r.fe hv.2.1,hv.2.2⟩
+  | disembark t f ht hv =>
+    rw [wr_truck_update]
+    have hh := Step.disembark (w := w) (wrState r s) (r.tr.new t) (r.fe.new f)
+      (by simp [wrState,wrTruck,r.tr.old_new,ht])
+      ⟨ir_new_bound r.tr hv.1,ir_new_bound r.fe hv.2⟩
+    simpa [wrTruck,wrState,r.fe.old_new] using hh
+  | sail f b hr hn hv =>
+    rw [wr_ferry_update]
+    exact Step.sail _ (r.fe.new f) b
+      ((r.serves _ _).mpr (by simpa only [r.fe.old_new] using hr))
+      (by simpa [wrState,r.fe.old_new] using hn)
+      ⟨ir_new_bound r.fe hv.1,hv.2⟩
+  | load p t a hp ht room hv =>
+    rw [wr_parcel_update]
+    exact Step.load _ (r.pa.new p) (r.tr.new t) a
+      (by simp [wrState,wrParcel,r.pa.old_new,hp])
+      (by simp [wrState,wrTruck,r.tr.old_new,ht])
+      (by rw [wr_load,r.weight,r.capacity,r.tr.old_new,r.pa.old_new]; exact room)
+      ⟨ir_new_bound r.pa hv.1,ir_new_bound r.tr hv.2.1,hv.2.2⟩
+  | unload p t a hp ht hv =>
+    rw [wr_parcel_update]
+    exact Step.unload _ (r.pa.new p) (r.tr.new t) a
+      (by simp [wrState,wrParcel,r.pa.old_new,hp])
+      (by simp [wrState,wrTruck,r.tr.old_new,ht])
+      ⟨ir_new_bound r.pa hv.1,ir_new_bound r.tr hv.2.1,hv.2.2⟩
+
+theorem wr_path (r : WorldRename w) {s u : State} {m h : Nat} (p : Path (Step w) s u m h) :
+    Path (Step w) (wrState r s) (wrState r u) m h := by
+  induction p with
+  | nil s => exact Path.nil _
+  | cons st rest ih => exact Path.cons (wr_step r st) ih
+
+theorem wr_goal (r : WorldRename w) (s : State) (h : Goal w s) : Goal w (wrState r s) := by
+  intro p hp
+  simp [wrState,wrParcel,h _ (ir_old_bound r.pa hp),r.destination p]
+
+def WorldRename.inverse (r : WorldRename w) : WorldRename w where
+  tr := r.tr.inverse
+  fe := r.fe.inverse
+  pa := r.pa.inverse
+  capacity := fun i => by simpa [IndexRename.inverse,r.tr.old_new] using (r.capacity (r.tr.new i)).symm
+  weight := fun i => by simpa [IndexRename.inverse,r.pa.old_new] using (r.weight (r.pa.new i)).symm
+  destination := fun i => by simpa [IndexRename.inverse,r.pa.old_new] using (r.destination (r.pa.new i)).symm
+  slots := fun i => by simpa [IndexRename.inverse,r.fe.old_new] using (r.slots (r.fe.new i)).symm
+  serves := fun i a => by simpa [IndexRename.inverse,r.fe.old_new] using (r.serves (r.fe.new i) a).symm
+
+theorem wr_inverse (r : WorldRename w) (s : State) :
+    wrState r.inverse (wrState r s) = s := by
+  cases s with
+  | mk tr fe pa =>
+    have ht : (wrState r.inverse (wrState r ⟨tr,fe,pa⟩)).truck = tr := by
+      funext i
+      simp only [wrState,WorldRename.inverse,IndexRename.inverse,r.tr.old_new]
+      cases tr i <;> simp [wrTruck,WorldRename.inverse,IndexRename.inverse,r.fe.old_new]
+    have hf : (wrState r.inverse (wrState r ⟨tr,fe,pa⟩)).ferry = fe := by
+      funext i
+      simp [wrState,WorldRename.inverse,IndexRename.inverse,r.fe.old_new]
+    have hp : (wrState r.inverse (wrState r ⟨tr,fe,pa⟩)).parcel = pa := by
+      funext i
+      simp only [wrState,WorldRename.inverse,IndexRename.inverse,r.pa.old_new]
+      cases pa i <;> simp [wrParcel,WorldRename.inverse,IndexRename.inverse,r.tr.old_new]
+    cases he : wrState r.inverse (wrState r ⟨tr,fe,pa⟩) with
+    | mk t f p =>
+      rw [he] at ht hf hp
+      simp only at ht hf hp
+      simp [ht,hf,hp]
+
+theorem wr_optimal (r : WorldRename w) (s : State) (cost : Nat) :
+    OptimalCompletion w s cost ↔ OptimalCompletion w (wrState r s) cost := by
+  constructor
+  · intro opt
+    constructor
+    · obtain ⟨u,m,h,p,g,hc⟩ := opt.1
+      exact ⟨wrState r u,m,h,wr_path r p,wr_goal r u g,hc⟩
+    · intro u m h p g
+      have q := wr_path r.inverse p
+      rw [wr_inverse] at q
+      exact opt.2 _ _ _ q (wr_goal r.inverse u g)
+  · intro opt
+    constructor
+    · obtain ⟨u,m,h,p,g,hc⟩ := opt.1
+      have q := wr_path r.inverse p
+      rw [wr_inverse] at q
+      exact ⟨wrState r.inverse u,m,h,q,wr_goal r.inverse u g,hc⟩
+    · intro u m h p g
+      exact opt.2 _ _ _ (wr_path r p) (wr_goal r u g)
+
+#print axioms wr_step
+#print axioms wr_path
+#print axioms wr_optimal
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Floyd's recurrence as actually used by metric().  A finite cap is
+-- permitted: projection from the extended arithmetic commutes with min
+-- and truncated addition.  No claim of equality to an unbounded
+-- optimum is needed to obtain a lower-bound certificate.
+def floydPhase (d : Nat → Nat → Nat) (k : Nat) (i j : Nat) : Nat :=
+  min (d i j) (d i k+d k j)
+
+def floydRun (d : Nat → Nat → Nat) : List Nat → Nat → Nat → Nat
+  | [] => d
+  | k::ks => floydRun (floydPhase d k) ks
+
+theorem floyd_phase_le (d : Nat → Nat → Nat) (k i j : Nat) :
+    floydPhase d k i j ≤ d i j := Nat.min_le_left _ _
+
+theorem floyd_phase_diag (d : Nat → Nat → Nat) (zero : ∀ i, d i i = 0) (k i : Nat) :
+    floydPhase d k i i = 0 := by
+  simp [floydPhase,zero i]
+
+theorem floyd_phase_pivot (d : Nat → Nat → Nat) (k : Nat) (zero : d k k = 0) :
+    (∀ i, floydPhase d k i k = d i k) ∧
+    (∀ j, floydPhase d k k j = d k j) := by
+  constructor <;> intro i <;> simp [floydPhase,zero]
+
+theorem floyd_phase_new_triangle (d : Nat → Nat → Nat) (k : Nat) (zero : d k k = 0) :
+    ∀ i j, floydPhase d k i j ≤ floydPhase d k i k + floydPhase d k k j := by
+  intro i j
+  rw [(floyd_phase_pivot d k zero).1 i,(floyd_phase_pivot d k zero).2 j]
+  exact Nat.min_le_right _ _
+
+theorem floyd_phase_old_triangle (d : Nat → Nat → Nat) (k l : Nat)
+    (old : ∀ i j, d i j ≤ d i l + d l j) :
+    ∀ i j, floydPhase d k i j ≤ floydPhase d k i l + floydPhase d k l j := by
+  intro i j
+  have h0 := old i j
+  have h1 := old k j
+  have h2 := old i k
+  have ha : floydPhase d k i j ≤ d i j := Nat.min_le_left _ _
+  have hb : floydPhase d k i j ≤ d i k+d k j := Nat.min_le_right _ _
+  unfold floydPhase at *
+  by_cases h : d i l ≤ d i k+d k l
+  · rw [Nat.min_eq_left h]
+    by_cases q : d l j ≤ d l k+d k j
+    · rw [Nat.min_eq_left q]
+      omega
+    · rw [Nat.min_eq_right (by omega : d l k+d k j ≤ d l j)]
+      omega
+  · rw [Nat.min_eq_right (by omega : d i k+d k l ≤ d i l)]
+    by_cases q : d l j ≤ d l k+d k j
+    · rw [Nat.min_eq_left q]
+      omega
+    · rw [Nat.min_eq_right (by omega : d l k+d k j ≤ d l j)]
+      omega
+
+theorem floyd_run_le (d : Nat → Nat → Nat) (ks : List Nat) (i j : Nat) :
+    floydRun d ks i j ≤ d i j := by
+  induction ks generalizing d with
+  | nil => exact Nat.le_refl _
+  | cons k ks ih =>
+    exact Nat.le_trans (ih (floydPhase d k)) (floyd_phase_le d k i j)
+
+theorem floyd_run_diag (d : Nat → Nat → Nat) (ks : List Nat) (zero : ∀ i, d i i = 0) :
+    ∀ i, floydRun d ks i i = 0 := by
+  induction ks generalizing d with
+  | nil => exact zero
+  | cons k ks ih =>
+    exact ih (floydPhase d k) (floyd_phase_diag d zero k)
+
+theorem floyd_run_preserves_triangle (d : Nat → Nat → Nat) (ks : List Nat) (l : Nat)
+    (tri : ∀ i j, d i j ≤ d i l + d l j) :
+    ∀ i j, floydRun d ks i j ≤ floydRun d ks i l + floydRun d ks l j := by
+  induction ks generalizing d with
+  | nil => exact tri
+  | cons k ks ih =>
+    exact ih (floydPhase d k) (floyd_phase_old_triangle d k l tri)
+
+theorem floyd_run_triangle (d : Nat → Nat → Nat) (ks : List Nat)
+    (zero : ∀ i, d i i = 0) (l : Nat) (mem : l ∈ ks) :
+    ∀ i j, floydRun d ks i j ≤ floydRun d ks i l + floydRun d ks l j := by
+  induction ks generalizing d with
+  | nil => simp at mem
+  | cons k ks ih =>
+    rcases List.mem_cons.mp mem with he | ht
+    · subst l
+      exact floyd_run_preserves_triangle (floydPhase d k) ks k
+        (floyd_phase_new_triangle d k (zero k))
+    · exact ih (floydPhase d k) (floyd_phase_diag d zero k) ht
+
+theorem floyd_run_sym (d : Nat → Nat → Nat) (ks : List Nat)
+    (sym : ∀ i j, d i j = d j i) :
+    ∀ i j, floydRun d ks i j = floydRun d ks j i := by
+  induction ks generalizing d with
+  | nil => exact sym
+  | cons k ks ih =>
+    apply ih
+    intro i j
+    unfold floydPhase
+    have h1 := sym i j
+    have h2 := sym i k
+    have h3 := sym k j
+    rw [h1,h2,h3,Nat.add_comm]
+
+-- In-place updates do not change the pivot row or column because
+-- diagonal entries are zero. Updating any cell twice is harmless.
+def floydWrite (d : Nat → Nat → Nat) (k : Nat) (cell : Nat × Nat)
+    (i j : Nat) : Nat :=
+  if (i,j) = cell then floydPhase d k i j else d i j
+
+theorem floyd_write_pivot (d : Nat → Nat → Nat) (k : Nat) (cell : Nat × Nat)
+    (zero : d k k = 0) :
+    (∀ i, floydWrite d k cell i k = d i k) ∧
+    (∀ j, floydWrite d k cell k j = d k j) := by
+  constructor
+  · intro i
+    unfold floydWrite
+    rw [(floyd_phase_pivot d k zero).1 i]
+    split <;> rfl
+  · intro j
+    unfold floydWrite
+    rw [(floyd_phase_pivot d k zero).2 j]
+    split <;> rfl
+
+theorem floyd_write_phase (d : Nat → Nat → Nat) (k : Nat) (cell : Nat × Nat)
+    (zero : d k k = 0) (i j : Nat) :
+    floydPhase (floydWrite d k cell) k i j = floydPhase d k i j := by
+  unfold floydPhase
+  rw [(floyd_write_pivot d k cell zero).1 i,(floyd_write_pivot d k cell zero).2 j]
+  unfold floydWrite
+  split
+  · simp only [floydPhase]
+    omega
+  · rfl
+
+def floydCells (d : Nat → Nat → Nat) (k : Nat) : List (Nat × Nat) → Nat → Nat → Nat
+  | [] => d
+  | c::cs => floydCells (floydWrite d k c) k cs
+
+theorem floyd_cells_exact (d : Nat → Nat → Nat) (k : Nat) (cells : List (Nat × Nat))
+    (zero : d k k = 0) (i j : Nat) :
+    floydCells d k cells i j =
+      if (i,j) ∈ cells then floydPhase d k i j else d i j := by
+  induction cells generalizing d with
+  | nil => simp [floydCells]
+  | cons c cs ih =>
+    have hz : floydWrite d k c k k = 0 :=
+      ((floyd_write_pivot d k c zero).1 k).trans zero
+    simp only [floydCells]
+    rw [ih (floydWrite d k c) hz,floyd_write_phase d k c zero]
+    by_cases he : (i,j) ∈ cs
+    · simp [he]
+    · simp [he,floydWrite]
+
+def metricCap (top : Nat) : Option Nat → Nat
+  | none => top
+  | some x => min top x
+
+def metricOptMin : Option Nat → Option Nat → Option Nat
+  | none, x | x, none => x
+  | some x, some y => some (min x y)
+
+def metricOptAdd : Option Nat → Option Nat → Option Nat
+  | some x, some y => some (x+y)
+  | _, _ => none
+
+theorem metric_cap_min (top : Nat) (x y : Option Nat) :
+    metricCap top (metricOptMin x y) = min (metricCap top x) (metricCap top y) := by
+  cases x <;> cases y <;> simp [metricCap,metricOptMin] <;> omega
+
+theorem metric_cap_add (top : Nat) (x y : Option Nat) :
+    metricCap top (metricOptAdd x y) = min top (metricCap top x + metricCap top y) := by
+  cases x <;> cases y <;> simp [metricCap,metricOptAdd] <;> omega
+
+def floydOptPhase (d : Nat → Nat → Option Nat) (k i j : Nat) : Option Nat :=
+  metricOptMin (d i j) (metricOptAdd (d i k) (d k j))
+
+theorem floyd_cap_phase (d : Nat → Nat → Option Nat) (top k i j : Nat) :
+    metricCap top (floydOptPhase d k i j) =
+      floydPhase (fun i j => metricCap top (d i j)) k i j := by
+  unfold floydOptPhase floydPhase
+  rw [metric_cap_min,metric_cap_add]
+  cases h : d i j <;> simp [metricCap,h] <;> omega
+
+-- A zero-distance representative is safe even when two actual vertices
+-- have distinct names: their rows and columns agree by triangle.
+theorem zero_metric_row (d : Nat → Nat → Nat)
+    (triangle : ∀ i k j, d i j ≤ d i k+d k j)
+    (sym : ∀ i j, d i j = d j i) {a b : Nat} (zero : d a b = 0) :
+    ∀ x, d a x = d b x := by
+  intro x
+  have h := triangle a b x
+  have q := triangle b a x
+  rw [sym b a,zero] at q
+  omega
+
+#print axioms floyd_run_triangle
+#print axioms floyd_run_sym
+#print axioms floyd_cells_exact
+#print axioms floyd_cap_phase
+#print axioms zero_metric_row
+
+end IslandLogistics
+
+namespace IslandLogistics
+
+-- This is the append-on-first-discovery loop used by cut(), components()
+-- and the road-only flood in the tree constructor. Each neighbor list
+-- may contain duplicates (e.g. several ferry cliques).
+def freshNeighbors : List Nat → List Nat → List Nat
+  | [], _ => []
+  | b::bs, seen => if b ∈ seen then freshNeighbors bs seen
+      else b::freshNeighbors bs (seen++[b])
+
+theorem fresh_neighbors_mem (bs seen : List Nat) (x : Nat) :
+    x ∈ seen ++ freshNeighbors bs seen ↔ x ∈ seen ∨ x ∈ bs := by
+  induction bs generalizing seen with
+  | nil => simp [freshNeighbors]
+  | cons b bs ih =>
+    by_cases he : b ∈ seen
+    · simp only [freshNeighbors,if_pos he]
+      rw [ih]
+      simp only [List.mem_cons]
+      constructor
+      · intro h
+        rcases h with h | h
+        · exact Or.inl h
+        · exact Or.inr (Or.inr h)
+      · intro h
+        rcases h with h | h
+        · exact Or.inl h
+        · rcases h with h | h
+          · subst x; exact Or.inl he
+          · exact Or.inr h
+    · simp only [freshNeighbors,if_neg he]
+      rw [show seen ++ b :: freshNeighbors bs (seen++[b]) =
+        (seen++[b]) ++ freshNeighbors bs (seen++[b]) by simp]
+      rw [ih]
+      simp [List.mem_append,or_assoc]
+
+theorem fresh_neighbors_nodup (bs seen : List Nat) (nd : seen.Nodup) :
+    (seen ++ freshNeighbors bs seen).Nodup := by
+  induction bs generalizing seen with
+  | nil => simpa [freshNeighbors] using nd
+  | cons b bs ih =>
+    by_cases he : b ∈ seen
+    · simpa [freshNeighbors,he] using ih seen nd
+    · have hnd' : (b::(seen++[])).Nodup := by
+        simpa only [List.append_nil] using (List.nodup_cons.mpr ⟨he,nd⟩)
+      have hnd : (seen++[b]).Nodup :=
+        (perm_move_front b seen []).nodup_iff.mp hnd'
+      have h := ih (seen++[b]) hnd
+      simpa [freshNeighbors,he,List.append_assoc] using h
+
+inductive FloodReach (adj : Nat → List Nat) (root : Nat) : Nat → Prop where
+  | start : FloodReach adj root root
+  | next {a b : Nat} : FloodReach adj root a → b ∈ adj a → FloodReach adj root b
+
+structure FloodInvariant (adj : Nat → List Nat) (root n : Nat)
+    (done todo : List Nat) : Prop where
+  nodup : (done++todo).Nodup
+  bounded : ∀ x ∈ done++todo, x < n
+  reached : ∀ x ∈ done++todo, FloodReach adj root x
+  rootSeen : root ∈ done++todo
+  closedDone : ∀ a ∈ done, ∀ b ∈ adj a, b ∈ done++todo
+
+theorem flood_initial (adj : Nat → List Nat) (root n : Nat) (hr : root < n) :
+    FloodInvariant adj root n [] [root] := by
+  constructor
+  · simp
+  · intro x hx; simp at hx; simpa [hx] using hr
+  · intro x hx; simp at hx; subst x; exact FloodReach.start
+  · simp
+  · simp
+
+theorem flood_process (adj : Nat → List Nat) (root n : Nat)
+    (bounded : ∀ a b, a < n → b ∈ adj a → b < n)
+    (done todo : List Nat) (a : Nat)
+    (inv : FloodInvariant adj root n done (a::todo)) :
+    FloodInvariant adj root n (done++[a])
+      (todo++freshNeighbors (adj a) (done++a::todo)) := by
+  let seen := done++a::todo
+  have ha : a ∈ seen := by simp [seen]
+  have eq : (done++[a]) ++ (todo++freshNeighbors (adj a) seen) =
+      seen ++ freshNeighbors (adj a) seen := by simp [seen,List.append_assoc]
+  constructor
+  · rw [eq]
+    exact fresh_neighbors_nodup _ _ inv.nodup
+  · intro x hx
+    rw [eq,fresh_neighbors_mem] at hx
+    rcases hx with h | h
+    · exact inv.bounded x h
+    · exact bounded a x (inv.bounded a ha) h
+  · intro x hx
+    rw [eq,fresh_neighbors_mem] at hx
+    rcases hx with h | h
+    · exact inv.reached x h
+    · exact FloodReach.next (inv.reached a ha) h
+  · rw [eq,fresh_neighbors_mem]
+    exact Or.inl inv.rootSeen
+  · intro x hx b hb
+    rw [eq,fresh_neighbors_mem]
+    rcases List.mem_append.mp hx with hx | hx
+    · exact Or.inl (inv.closedDone x hx b hb)
+    · simp at hx
+      subst x
+      exact Or.inr hb
+
+def floodLoop (adj : Nat → List Nat) : Nat → List Nat → List Nat → List Nat × List Nat
+  | 0, done, todo => (done,todo)
+  | _+1, done, [] => (done,[])
+  | fuel+1, done, a::todo =>
+    floodLoop adj fuel (done++[a]) (todo++freshNeighbors (adj a) (done++a::todo))
+
+theorem flood_complete (adj : Nat → List Nat) (root n : Nat)
+    (bounded : ∀ a b, a < n → b ∈ adj a → b < n)
+    (fuel : Nat) (done todo : List Nat)
+    (inv : FloodInvariant adj root n done todo)
+    (enough : n ≤ fuel+done.length) :
+    (floodLoop adj fuel done todo).2 = [] ∧
+      FloodInvariant adj root n (floodLoop adj fuel done todo).1 [] := by
+  induction fuel generalizing done todo with
+  | zero =>
+    have hlen := ride_cover_length (done++todo) (List.range n) inv.nodup
+      (by intro x hx; exact List.mem_range.mpr (inv.bounded x hx))
+    simp only [List.length_append,List.length_range] at hlen
+    have ht : todo.length = 0 := by omega
+    have he : todo = [] := by simpa using ht
+    subst todo
+    exact ⟨rfl,inv⟩
+  | succ fuel ih =>
+    cases todo with
+    | nil => exact ⟨rfl,inv⟩
+    | cons a todo =>
+      have h := flood_process adj root n bounded done todo a inv
+      have hen : n ≤ fuel+(done++[a]).length := by
+        simp
+        omega
+      exact ih _ _ h hen
+
+def floodSet (adj : Nat → List Nat) (n root : Nat) : List Nat :=
+  (floodLoop adj n [] [root]).1
+
+theorem flood_set_certificate (adj : Nat → List Nat) (n root : Nat)
+    (hr : root < n) (bounded : ∀ a b, a < n → b ∈ adj a → b < n) :
+    root ∈ floodSet adj n root ∧
+      (∀ a ∈ floodSet adj n root, FloodReach adj root a) ∧
+      (∀ a ∈ floodSet adj n root, ∀ b ∈ adj a, b ∈ floodSet adj n root) := by
+  have h := (flood_complete adj root n bounded n [] [root]
+    (flood_initial adj root n hr) (by simp)).2
+  simpa [floodSet] using And.intro h.rootSeen (And.intro h.reached h.closedDone)
+
+theorem flood_set_exact (adj : Nat → List Nat) (n root : Nat)
+    (hr : root < n) (bounded : ∀ a b, a < n → b ∈ adj a → b < n) (x : Nat) :
+    x ∈ floodSet adj n root ↔ FloodReach adj root x := by
+  obtain ⟨hs,reach,closed⟩ := flood_set_certificate adj n root hr bounded
+  constructor
+  · exact reach x
+  · intro hx
+    induction hx with
+    | start => exact hs
+    | next prior hmem ih => exact closed _ ih _ hmem
+
+-- Removing one undirected road and flooding yields a side which no
+-- remaining edge can cross. In particular every positive-slot ferry
+-- clique is on one side. Distinct removed edges yield a disjoint
+-- charge partition, even when their vertex sets are nested.
+structure BridgeSideCertificate (w : World) where
+  a : Nat
+  b : Nat
+  side : Nat → Bool
+  split : side a ≠ side b
+  others : ∀ x y, w.road x y →
+    ¬ ((x=a ∧ y=b) ∨ (x=b ∧ y=a)) → side x = side y
+  ferries : ∀ f x y, 0 < w.slots f → w.route f x → w.route f y →
+    side x = side y
+
+theorem flood_edge_side (adj : Nat → List Nat) (n root : Nat)
+    (hr : root < n) (bounded : ∀ a b, a < n → b ∈ adj a → b < n)
+    (x y : Nat) (xy : y ∈ adj x) (yx : x ∈ adj y) :
+    (floodSet adj n root).contains x = (floodSet adj n root).contains y := by
+  have closed := (flood_set_certificate adj n root hr bounded).2.2
+  cases hx : (floodSet adj n root).contains x <;>
+    cases hy : (floodSet adj n root).contains y
+  · rfl
+  · have h := closed y (by simpa using hy) x yx
+    have hx' : (floodSet adj n root).contains x = true := by simpa using h
+    rw [hx] at hx'
+    contradiction
+  · have h := closed x (by simpa using hx) y xy
+    have hy' : (floodSet adj n root).contains y = true := by simpa using h
+    rw [hy] at hy'
+    contradiction
+  · rfl
+
+theorem flood_bridge_certificate (w : World) (adj : Nat → List Nat)
+    (a b : Nat) (ha : a < w.locations)
+    (bounded : ∀ x y, x < w.locations → y ∈ adj x → y < w.locations)
+    (split : b ∉ floodSet adj w.locations a)
+    (roads : ∀ x y, w.road x y → ¬ ((x=a ∧ y=b) ∨ (x=b ∧ y=a)) →
+      y ∈ adj x ∧ x ∈ adj y)
+    (ferries : ∀ f x y, 0 < w.slots f → w.route f x → w.route f y →
+      y ∈ adj x ∧ x ∈ adj y) :
+    ∃ c : BridgeSideCertificate w, c.a = a ∧ c.b = b ∧
+      c.side = (fun x => (floodSet adj w.locations a).contains x) := by
+  let side := fun x => (floodSet adj w.locations a).contains x
+  have h1 : side a = true := by
+    simpa [side] using (flood_set_certificate adj w.locations a ha bounded).1
+  have h2 : side b = false := by
+    cases h : side b
+    · rfl
+    · exact False.elim (split (by simpa [side] using h))
+  refine ⟨⟨a,b,side,by rw [h1,h2]; decide,?_,?_⟩,rfl,rfl,rfl⟩
+  · intro x y hr hn
+    exact flood_edge_side adj w.locations a ha bounded x y (roads x y hr hn).1 (roads x y hr hn).2
+  · intro f x y hs hx hy
+    exact flood_edge_side adj w.locations a ha bounded x y (ferries f x y hs hx hy).1 (ferries f x y hs hx hy).2
+
+def sameRemoved {w : World} (c : BridgeSideCertificate w) (x y : Nat) : Prop :=
+  (x=c.a ∧ y=c.b) ∨ (x=c.b ∧ y=c.a)
+
+def UniqueRemoved {w : World} : List (BridgeSideCertificate w) → Prop
+  | [] => True
+  | c::cs => (∀ d ∈ cs, ¬ sameRemoved d c.a c.b) ∧ UniqueRemoved cs
+
+theorem bridge_side_delta_le (w : World) (cs : List (BridgeSideCertificate w))
+    (unique : UniqueRemoved cs) (x y : Nat) (hr : w.road x y) :
+    (cs.map (fun c => sideDelta c.side x y)).sum ≤ 1 := by
+  induction cs with
+  | nil => simp
+  | cons c cs ih =>
+    have hu := unique.1
+    by_cases he : sameRemoved c x y
+    · have hz : (cs.map (fun d => sideDelta d.side x y)).sum = 0 := by
+        apply sum_map_eq_zero
+        intro d hd
+        have hn : ¬ sameRemoved d x y := by
+          intro h
+          apply hu d hd
+          rcases he with ⟨hx,hy⟩ | ⟨hx,hy⟩
+          · simpa [hx,hy] using h
+          · rcases h with ⟨ha,hb⟩ | ⟨ha,hb⟩
+            · exact Or.inr ⟨hy.symm.trans hb,hx.symm.trans ha⟩
+            · exact Or.inl ⟨hy.symm.trans hb,hx.symm.trans ha⟩
+        simp [sideDelta,d.others x y hr hn]
+      change sideDelta c.side x y + (cs.map (fun d => sideDelta d.side x y)).sum ≤ 1
+      rw [hz,Nat.add_zero]
+      unfold sideDelta
+      split <;> omega
+    · have hb := ih unique.2
+      change sideDelta c.side x y + (cs.map (fun d => sideDelta d.side x y)).sum ≤ 1
+      have hzero : sideDelta c.side x y = 0 := by simp [sideDelta,c.others x y hr he]
+      rw [hzero,Nat.zero_add]
+      exact hb
+
+def certifiedBridgeSystem (w : World) (cs : List (BridgeSideCertificate w))
+    (unique : UniqueRemoved cs) : RoadCutSystem w where
+  cuts := cs.map BridgeSideCertificate.side
+  road := by
+    intro x y hr
+    simpa only [List.map_map,Function.comp_def] using bridge_side_delta_le w cs unique x y hr
+  ferry := by
+    intro side hs f x y hk hx hy
+    obtain ⟨c,hc,rfl⟩ := List.mem_map.mp hs
+    exact c.ferries f x y hk hx hy
+
+#print axioms flood_complete
+#print axioms flood_set_exact
+#print axioms flood_bridge_certificate
+#print axioms certifiedBridgeSystem
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- The final checks in Pattern, StockRidePattern and SailingPattern
+-- certify the result independently of the relaxation schedule.
+def bellmanCheck (d : Nat → Nat) (arcs : List BellmanArc) (goals : List Nat) : Bool :=
+  arcs.all (fun e => decide (d e.src ≤ e.cost+d e.dst)) &&
+  goals.all (fun g => decide (d g = 0))
+
+theorem bellman_check_edge (d : Nat → Nat) (arcs : List BellmanArc) (goals : List Nat)
+    (ok : bellmanCheck d arcs goals = true) (e : BellmanArc) (he : e ∈ arcs) :
+    d e.src ≤ e.cost+d e.dst := by
+  have h : arcs.all (fun e => decide (d e.src ≤ e.cost+d e.dst)) = true := by
+    unfold bellmanCheck at ok
+    cases ha : arcs.all (fun e => decide (d e.src ≤ e.cost+d e.dst)) <;> simp [ha] at ok ⊢
+  have hb := List.all_eq_true.mp h e he
+  simpa using hb
+
+theorem bellman_check_goal (d : Nat → Nat) (arcs : List BellmanArc) (goals : List Nat)
+    (ok : bellmanCheck d arcs goals = true) (g : Nat) (hg : g ∈ goals) : d g = 0 := by
+  have h : goals.all (fun g => decide (d g = 0)) = true := by
+    unfold bellmanCheck at ok
+    cases ha : goals.all (fun g => decide (d g = 0)) <;> simp [ha] at ok ⊢
+  have hb := List.all_eq_true.mp h g hg
+  simpa using hb
+
+def CheckedArcStep (arcs : List BellmanArc) (s t a b : Nat) : Prop :=
+  b = 0 ∧ (⟨s,t,a⟩ : BellmanArc) ∈ arcs
+
+theorem checked_pdb_path_bound (d : Nat → Nat) (arcs : List BellmanArc) (goals : List Nat)
+    (ok : bellmanCheck d arcs goals = true)
+    {s t m h : Nat} (p : Path (CheckedArcStep arcs) s t m h) (hg : t ∈ goals) :
+    d s ≤ m := by
+  have hstep : ∀ s t a b, CheckedArcStep arcs s t a b → d s ≤ a+d t := by
+    intro s t a b st
+    exact bellman_check_edge d arcs goals ok _ st.2
+  have hb := potential_bound d hstep p
+  have hz := bellman_check_goal d arcs goals ok t hg
+  omega
+
+-- Translating by fixed counts is injective on legal source vectors,
+-- regardless of overlap between the source and destination index sets.
+-- Use this for advanced indexing, not an unjustified uniqueness
+-- assumption about the batches.
+def countTransfer (x : Nat → Nat) (a b amount : Nat) : Nat → Nat :=
+  fun z => x z - (if z = a then amount else 0) + (if z = b then amount else 0)
+
+theorem count_transfer_balance (x : Nat → Nat) (a b amount z : Nat) (fit : amount ≤ x a) :
+    countTransfer x a b amount z + (if z = a then amount else 0) =
+      x z + (if z = b then amount else 0) := by
+  unfold countTransfer
+  by_cases he : z = a
+  · subst z
+    simp only [if_pos rfl]
+    have heq : a = a := rfl
+    simp [heq]
+    omega
+  · simp [he]
+
+theorem count_transfer_injective (x y : Nat → Nat) (a b amount : Nat)
+    (hx : amount ≤ x a) (hy : amount ≤ y a)
+    (eq : countTransfer x a b amount = countTransfer y a b amount) : x = y := by
+  funext z
+  have h1 := count_transfer_balance x a b amount z hx
+  have h2 := count_transfer_balance y a b amount z hy
+  have h3 := congrFun eq z
+  omega
+
+theorem count_transfer_reverse (x : Nat → Nat) (a b amount : Nat) (fit : amount ≤ x a) :
+    countTransfer (countTransfer x a b amount) b a amount = x := by
+  have hb : amount ≤ countTransfer x a b amount b := by
+    unfold countTransfer
+    by_cases he : b = a
+    · subst b
+      simp
+    · simp [he]
+  funext z
+  have h1 := count_transfer_balance x a b amount z fit
+  have h2 := count_transfer_balance (countTransfer x a b amount) b a amount z hb
+  omega
+
+-- Exact pointwise minimum and saturated addition used by the array
+-- route recurrence and reduceat convolution.  Infinity maps to TOP.
+def cappedPlus (top a b : Nat) : Nat := min top (a+b)
+
+theorem capped_plus_opt (top : Nat) (a b : Option Nat) :
+    cappedPlus top (metricCap top a) (metricCap top b) =
+      metricCap top (metricOptAdd a b) := (metric_cap_add top a b).symm
+
+def optFoldMin : List (Option Nat) → Option Nat
+  | [] => none
+  | a::as => metricOptMin a (optFoldMin as)
+
+theorem cap_fold_min (top : Nat) (xs : List (Option Nat)) :
+    metricCap top (optFoldMin xs) = minCandidate top (xs.map (metricCap top)) := by
+  induction xs with
+  | nil => rfl
+  | cons a as ih =>
+    simp only [optFoldMin,minCandidate,List.map_cons,metric_cap_min,ih]
+
+theorem capped_minplus_exact (top : Nat) (xs : List (Option Nat × Option Nat)) :
+    metricCap top (optFoldMin (xs.map (fun ab => metricOptAdd ab.1 ab.2))) =
+      minCandidate top (xs.map (fun ab => cappedPlus top (metricCap top ab.1) (metricCap top ab.2))) := by
+  rw [cap_fold_min,List.map_map]
+  simp only [Function.comp_def,metric_cap_add,cappedPlus]
+
+theorem cap_top_skippable (top x : Nat) : cappedPlus top top x = top := by
+  unfold cappedPlus
+  omega
+
+theorem signed64_route_add_safe (top a b : Nat) (ht : top ≤ 2^60)
+    (ha : a ≤ top) (hb : b ≤ top) : a+b < 2^63 := by omega
+
+-- DirectCutAssignments guard, including intermediate costs of all
+-- disjoint subtrees.  The int16 guard is slightly tighter than a
+-- uniform factor-eight estimate; enumerate the bounded parameters
+-- symbolically, not any assignment fixtures.
+theorem direct_int16_guard (nb scale P T : Nat)
+    (hn : 1 ≤ nb ∧ nb ≤ 149) (hs : 1 ≤ scale ∧ scale ≤ 2)
+    (hp : 2 ≤ P ∧ P ≤ 6) (ht : 2 ≤ T ∧ T ≤ 4)
+    (guard : nb*6*scale*(2*P+2*T+1) < 30000) :
+    (nb-1)*8*scale*(2*P+T) < 32768 := by
+  have sp : scale = 1 ∨ scale = 2 := by omega
+  have pp : P = 2 ∨ P = 3 ∨ P = 4 ∨ P = 5 ∨ P = 6 := by omega
+  have tt : T = 2 ∨ T = 3 ∨ T = 4 := by omega
+  rcases sp with rfl | rfl <;>
+    rcases pp with rfl | rfl | rfl | rfl | rfl <;>
+    rcases tt with rfl | rfl | rfl <;> omega
+
+theorem direct_int32_guard (nb scale P T : Nat)
+    (hn : nb ≤ 149) (hs : scale ≤ 4096) (hp : P ≤ 6) (ht : T ≤ 4) :
+    (nb-1)*8*scale*(2*P+T) < 2^31 := by
+  have h1 : nb-1 ≤ 148 := by omega
+  have h2 : 2*P+T ≤ 16 := by omega
+  have hb : (nb-1)*8*scale*(2*P+T) ≤ 148*8*4096*16 :=
+    Nat.mul_le_mul (Nat.mul_le_mul (Nat.mul_le_mul_right 8 h1) hs) h2
+  omega
+
+-- The per-class Pattern load guard bounds even the extra proposal to
+-- LOAD a package, before it is rejected by capacity.
+theorem pattern_load_proposal_guard (W count total next : Nat)
+    (hn : 1 ≤ count) (ht : total ≤ W*count) (hw : next ≤ W)
+    (guard : W*count < 2^60) :
+    total+next < 2^61 := by
+  have hW := Nat.mul_le_mul_left W hn
+  rw [Nat.mul_one] at hW
+  omega
+
+-- The final max/min composition of the actual three evaluator branches.
+-- Each assignment candidate has the form 2*r + max(move,route+extra).
+-- A path supplies one admitted column. The scalar formula is independent
+-- of the evaluation order, the cache or the greedy optional-work gate.
+def maxCandidates : List Nat → Nat
+  | [] => 0
+  | x::xs => max x (maxCandidates xs)
+
+theorem max_candidates_le (xs : List Nat) (budget : Nat)
+    (h : ∀ x ∈ xs, x ≤ budget) : maxCandidates xs ≤ budget := by
+  induction xs with
+  | nil => simp [maxCandidates]
+  | cons x xs ih =>
+    exact max_bound x (maxCandidates xs) budget (h x (by simp))
+      (ih (fun y hy => h y (List.mem_cons_of_mem _ hy)))
+
+structure TransferColumn where
+  omitted : Nat
+  route : Nat
+  extra : Nat
+
+def columnCost (move : Nat) (x : TransferColumn) : Nat :=
+  2*x.omitted+max move (x.route+x.extra)
+
+def transferMinimum (top move : Nat) (cols : List TransferColumn) : Nat :=
+  minCandidate top (cols.map (columnCost move))
+
+theorem transfer_minimum_witness (top move m e : Nat) (cols : List TransferColumn)
+    (hm : move ≤ m) (witness : ∃ x ∈ cols, 2*x.omitted ≤ e ∧ x.route+x.extra ≤ m) :
+    transferMinimum top move cols ≤ m+e := by
+  obtain ⟨x,hx,he,hr⟩ := witness
+  have h1 := minCandidate_le_member top (cols.map (columnCost move)) (columnCost move x)
+    (List.mem_map.mpr ⟨x,hx,rfl⟩)
+  have h2 := max_bound move (x.route+x.extra) m hm hr
+  unfold transferMinimum columnCost at *
+  omega
+
+def candidateOrdinary (H move : Nat) (columns : List (List TransferColumn)) (top : Nat) : Nat :=
+  H+max move (maxCandidates (columns.map (transferMinimum top move)))
+
+theorem candidate_ordinary_path (w : World) {s u : State} {m h e : Nat}
+    (path : ResidualPath w s u m h e) (done : Goal w u)
+    (move top : Nat) (columns : List (List TransferColumn))
+    (hm : move ≤ m)
+    (witness : ∀ cs ∈ columns, ∃ x ∈ cs, 2*x.omitted ≤ e ∧ x.route+x.extra ≤ m) :
+    candidateOrdinary (handling w s) move columns top ≤ m+h := by
+  have hc : maxCandidates (columns.map (transferMinimum top move)) ≤ m+e := by
+    apply max_candidates_le
+    intro y hy
+    obtain ⟨cs,hcs,rfl⟩ := List.mem_map.mp hy
+    exact transfer_minimum_witness top move m e cs hm (witness cs hcs)
+  have hh := residual_goal_budget w path done
+  have hmax := max_bound move (maxCandidates (columns.map (transferMinimum top move))) (m+e)
+    (by omega) hc
+  unfold candidateOrdinary
+  omega
+
+inductive EvaluatorBranch where
+  | zero
+  | geographic (value : Nat)
+  | virtual (columns : List TransferColumn)
+  | ordinary (move : Nat) (columns : List (List TransferColumn))
+
+def evalBranch (top H : Nat) : EvaluatorBranch → Nat
+  | .zero => 0
+  | .geographic v => H+v
+  | .virtual cs => H+transferMinimum top 0 cs
+  | .ordinary move cs => candidateOrdinary H move cs top
+
+def EvaluatorWitness (m e : Nat) : EvaluatorBranch → Prop
+  | .zero => True
+  | .geographic v => v ≤ m+e
+  | .virtual cs => ∃ x ∈ cs, 2*x.omitted ≤ e ∧ x.route+x.extra ≤ m
+  | .ordinary move cs => move ≤ m ∧
+      ∀ c ∈ cs, ∃ x ∈ c, 2*x.omitted ≤ e ∧ x.route+x.extra ≤ m
+
+theorem evaluator_branch_path (w : World) {s u : State} {m h e : Nat}
+    (path : ResidualPath w s u m h e) (done : Goal w u)
+    (top : Nat) (branch : EvaluatorBranch) (witness : EvaluatorWitness m e branch) :
+    evalBranch top (handling w s) branch ≤ m+h := by
+  cases branch with
+  | zero => exact Nat.zero_le _
+  | geographic v => exact geographic_budget_admissible w path done v witness
+  | virtual cs =>
+    have h1 := transfer_minimum_witness top 0 m e cs (Nat.zero_le _) witness
+    have h2 := residual_goal_budget w path done
+    simp only [evalBranch]
+    omega
+  | ordinary move cs =>
+    exact candidate_ordinary_path w path done move top cs witness.1 witness.2
+
+#print axioms checked_pdb_path_bound
+#print axioms count_transfer_injective
+#print axioms count_transfer_reverse
+#print axioms capped_minplus_exact
+#print axioms direct_int16_guard
+#print axioms direct_int32_guard
+#print axioms pattern_load_proposal_guard
+#print axioms evaluator_branch_path
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Full-ferry priority: every legal completion of a state with a full
+-- ferry and a loaded passenger can start with a SAIL or DISEMBARK of
+-- that ferry, without changing the completion cost or terminal state.
+theorem other_passenger_iff (w : World) (f t : Nat) {s u : State} {m h : Nat}
+    (st : OtherStep w f s u m h) :
+    u.truck t = .onFerry f ↔ s.truck t = .onFerry f := by
+  cases st with
+  | drive q a b hq hr hv =>
+    by_cases he : t=q
+    · subst t; simp [setAt,hq]
+    · simp [setAt,he]
+  | board q g a diff hq hg hr room hv =>
+    by_cases he : t=q
+    · subst t; simp [setAt,hq,diff]
+    · simp [setAt,he]
+  | disembark q g diff hq hv =>
+    by_cases he : t=q
+    · subst t; simp [setAt,hq,diff]
+    · simp [setAt,he]
+  | sail => rfl
+  | load => rfl
+  | unload => rfl
+
+theorem other_occupancy_same (w : World) (f : Nat) {s u : State} {m h : Nat}
+    (st : OtherStep w f s u m h) : occupancy w u f = occupancy w s f := by
+  unfold occupancy
+  apply sumN_congr
+  intro t _
+  simp only [other_passenger_iff w f t st]
+
+theorem other_aboard_cargo (w : World) (f t p : Nat) {s u : State} {m h : Nat}
+    (st : OtherStep w f s u m h) (ht : s.truck t = .onFerry f)
+    (hp : s.parcel p = .onTruck t) : u.parcel p = .onTruck t := by
+  cases st with
+  | load q v a hq hv room valid =>
+    have hn : p ≠ q := by intro he; subst q; rw [hp] at hq; cases hq
+    simp [setAt,hn,hp]
+  | unload q v a hq hv valid =>
+    have hn : p ≠ q := by
+      intro he; subst q
+      have htv : t=v := by simpa [hp] using hq
+      subst v
+      rw [ht] at hv
+      cases hv
+    simp [setAt,hn,hp]
+  | drive => exact hp
+  | board => exact hp
+  | disembark => exact hp
+  | sail => exact hp
+
+def earlyLeave (s : State) (t f : Nat) : State :=
+  {s with truck := setAt s.truck t (.land (s.ferry f))}
+
+theorem other_early_leave (w : World) (f t : Nat) {s u : State} {m h : Nat}
+    (st : OtherStep w f s u m h) (ht : s.truck t = .onFerry f) :
+    OtherStep w f (earlyLeave s t f) (earlyLeave u t f) m h := by
+  cases st with
+  | drive q a b hq hr hv =>
+    have hn : q ≠ t := by intro he; subst q; rw [ht] at hq; cases hq
+    have hq' : (earlyLeave s t f).truck q = .land a := by simp [earlyLeave,setAt,hn,hq]
+    have step := OtherStep.drive (w := w) (f := f) (earlyLeave s t f) q a b hq' hr hv
+    have eq := freeze_setAt_swap s.truck t q (.land b) (.land (s.ferry f)) hn
+    simpa only [earlyLeave,eq] using step
+  | board q g a diff hq hg hr room hv =>
+    have hn : q ≠ t := by intro he; subst q; rw [ht] at hq; cases hq
+    have hq' : (earlyLeave s t f).truck q = .land a := by simp [earlyLeave,setAt,hn,hq]
+    have hocc : occupancy w (earlyLeave s t f) g = occupancy w s g :=
+      ride_occ_replace_eq w s t g _ (by simp [ht,Ne.symm diff])
+    have step := OtherStep.board (w := w) (f := f) (earlyLeave s t f) q g a diff
+      hq' hg hr (by rw [hocc]; exact room) hv
+    have eq := freeze_setAt_swap s.truck t q (.onFerry g) (.land (s.ferry f)) hn
+    simpa only [earlyLeave,eq] using step
+  | disembark q g diff hq hv =>
+    have hn : q ≠ t := by
+      intro he; subst q
+      rw [ht] at hq
+      have heq : f=g := by simpa using hq
+      exact diff heq.symm
+    have hq' : (earlyLeave s t f).truck q = .onFerry g := by simp [earlyLeave,setAt,hn,hq]
+    have step := OtherStep.disembark (w := w) (f := f) (earlyLeave s t f) q g diff hq' hv
+    have eq := freeze_setAt_swap s.truck t q (.land (s.ferry g)) (.land (s.ferry f)) hn
+    simpa only [earlyLeave,eq] using step
+  | sail g b diff hr hne hv =>
+    have step := OtherStep.sail (w := w) (f := f) (earlyLeave s t f) g b diff hr hne hv
+    simpa [earlyLeave,sailAt,setAt,Ne.symm diff] using step
+  | load p q a hp hq room hv =>
+    have hn : q ≠ t := by intro he; subst q; rw [ht] at hq; cases hq
+    have hq' : (earlyLeave s t f).truck q = .land a := by simp [earlyLeave,setAt,hn,hq]
+    exact OtherStep.load _ p q a hp hq' room hv
+  | unload p q a hp hq hv =>
+    have hn : q ≠ t := by intro he; subst q; rw [ht] at hq; cases hq
+    have hq' : (earlyLeave s t f).truck q = .land a := by simp [earlyLeave,setAt,hn,hq]
+    exact OtherStep.unload _ p q a hp hq' hv
+
+inductive FerryProgress (w : World) (f : Nat) : State → State → Nat → Prop where
+  | sail (s : State) (b : Nat) : w.route f b → s.ferry f ≠ b →
+      f < w.ferries ∧ b < w.locations → FerryProgress w f s (sailAt s f b) 3
+  | leave (s : State) (t : Nat) : s.truck t = .onFerry f →
+      t < w.trucks ∧ f < w.ferries → FerryProgress w f s (earlyLeave s t f) 1
+
+theorem ferry_progress_legal (w : World) (f : Nat) {s u : State} {c : Nat}
+    (p : FerryProgress w f s u c) : Step w s u c 0 := by
+  cases p with
+  | sail b hr hn hv => exact Step.sail s f b hr hn hv
+  | leave t ht hv => exact Step.disembark s t f ht hv
+
+theorem ferry_full_classify (w : World) (f : Nat) {s u : State} {m h : Nat}
+    (st : Step w s u m h) (full : occupancy w s f = w.slots f) :
+    OtherStep w f s u m h ∨ (h=0 ∧ FerryProgress w f s u m) := by
+  cases st with
+  | drive t a b ht hr hv => exact Or.inl (OtherStep.drive s t a b ht hr hv)
+  | board t g a ht hg hr room hv =>
+    by_cases he : g=f
+    · subst g; omega
+    · exact Or.inl (OtherStep.board s t g a he ht hg hr room hv)
+  | disembark t g ht hv =>
+    by_cases he : g=f
+    · subst g; exact Or.inr ⟨rfl,FerryProgress.leave s t ht hv⟩
+    · exact Or.inl (OtherStep.disembark s t g he ht hv)
+  | sail g b hr hn hv =>
+    by_cases he : g=f
+    · subst g; exact Or.inr ⟨rfl,FerryProgress.sail s b hr hn hv⟩
+    · exact Or.inl (OtherStep.sail s g b he hr hn hv)
+  | load p t a hp ht room hv => exact Or.inl (OtherStep.load s p t a hp ht room hv)
+  | unload p t a hp ht hv => exact Or.inl (OtherStep.unload s p t a hp ht hv)
+
+theorem advance_ferry_progress (w : World) (f : Nat) {s u v : State}
+    {m h c : Nat} (other : OtherStep w f s u m h) (progress : FerryProgress w f u v c) :
+    ∃ z, FerryProgress w f s z c ∧ OtherStep w f z v m h := by
+  cases progress with
+  | sail b hr hn hv =>
+    have hs : s.ferry f ≠ b := by
+      rw [← other_preserves_ferry w f other]
+      exact hn
+    exact ⟨sailAt s f b,FerryProgress.sail s b hr hs hv,other_commutes w f b other⟩
+  | leave t ht hv =>
+    have hs := (other_passenger_iff w f t other).mp ht
+    exact ⟨earlyLeave s t f,FerryProgress.leave s t hs hv,other_early_leave w f t other hs⟩
+
+theorem full_loaded_ferry_priority (w : World) (f t p : Nat)
+    {s u : State} {m h : Nat} (path : Path (Step w) s u m h) (done : Goal w u)
+    (valid : p < w.parcels) (full : occupancy w s f = w.slots f)
+    (ht : s.truck t = .onFerry f) (hp : s.parcel p = .onTruck t) :
+    ∃ z c d, FerryProgress w f s z c ∧ Path (Step w) z u d h ∧ m=c+d := by
+  induction path with
+  | nil s =>
+    have hg := done p valid
+    rw [hp] at hg
+    cases hg
+  | @cons s v u a b m h st tail ih =>
+    rcases ferry_full_classify w f st full with other | ⟨hb,progress⟩
+    · have hf := (other_occupancy_same w f other).trans full
+      have ht' := (other_passenger_iff w f t other).mpr ht
+      have hp' := other_aboard_cargo w f t p other ht hp
+      obtain ⟨z,c,d,hprog,hpath,hm⟩ := ih done hf ht' hp'
+      obtain ⟨z',hprog',ho⟩ := advance_ferry_progress w f other hprog
+      exact ⟨z',c,a+d,hprog',Path.cons (other_is_step w f ho) hpath,by omega⟩
+    · subst b
+      exact ⟨v,a,m,progress,by simpa using tail,by omega⟩
+
+#print axioms other_early_leave
+#print axioms advance_ferry_progress
+#print axioms full_loaded_ferry_priority
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Fleet aggregation of the already checked per-ferry completed-ride
+-- credit. This is the fleet grouping used by HubFlow, not a different
+-- abstract schedule for each port.
+def fleetPortSail (fleet : Nat → Bool) (out : Bool) (port : Nat)
+    (s : State) (act : ActionLabel) : Nat :=
+  match act with
+  | .sail f b => if fleet f = true ∧ (if out then s.ferry f = port else b = port)
+      then 1 else 0
+  | _ => 0
+
+def fleetPortSpent (w : World) (fleet : Nat → Bool) (out : Bool) (port : Nat)
+    (e : EffectiveEvent) : Nat :=
+  sumN (fun f => if fleet f then portSpendSum w out f port e.source e.anchor e.action
+    else 0) w.ferries
+
+def fleetPortAllowance (w : World) (fleet : Nat → Bool) (out : Bool) (port : Nat)
+    (e : EffectiveEvent) : Nat :=
+  sumN (fun f => if fleet f then portSailAllowance w out f port e.source e.action
+    else 0) w.ferries
+
+theorem sum_map_sumN_commute {α : Type} (xs : List α) (n : Nat) (v : α → Nat → Nat) :
+    (xs.map (fun e => sumN (v e) n)).sum =
+      sumN (fun f => (xs.map (fun e => v e f)).sum) n := by
+  induction xs with
+  | nil => simp [sumN_zero]
+  | cons e es ih =>
+    simp only [List.map_cons,List.sum_cons,ih]
+    rw [sumN_add]
+
+theorem fleet_event_allowance_le (w : World) (fleet : Nat → Bool) (k : Nat)
+    (cap : ∀ f, f < w.ferries → fleet f = true → w.slots f ≤ k)
+    (out : Bool) (port : Nat)
+    {s u : State} {a : ActionLabel} {m h : Nat} (st : LabelStep w s u a m h)
+    (A : Nat → Nat) :
+    fleetPortAllowance w fleet out port ⟨s,A,a⟩ ≤ k*fleetPortSail fleet out port s a := by
+  cases st with
+  | sail f b hr hn hv =>
+    unfold fleetPortAllowance
+    rw [sumN_single _ _ f hv.1 (by intro g hg hne; simp [portSailAllowance,Ne.symm hne])]
+    by_cases hf : fleet f = true
+    · have hcap := cap f hv.1 hf
+      by_cases hp : (if out then s.ferry f = port else b = port)
+      · simp [portSailAllowance,fleetPortSail,hf,hp,hcap]
+      · simp [portSailAllowance,fleetPortSail,hf,hp]
+    · have hf' : fleet f = false := by cases he : fleet f <;> simp_all
+      simp [portSailAllowance,fleetPortSail,hf']
+  | drive => simp [fleetPortAllowance,portSailAllowance,fleetPortSail,sumN_zero]
+  | board => simp [fleetPortAllowance,portSailAllowance,fleetPortSail,sumN_zero]
+  | disembark => simp [fleetPortAllowance,portSailAllowance,fleetPortSail,sumN_zero]
+  | load => simp [fleetPortAllowance,portSailAllowance,fleetPortSail,sumN_zero]
+  | unload => simp [fleetPortAllowance,portSailAllowance,fleetPortSail,sumN_zero]
+
+theorem fleet_allowance_trace_le (w : World) (fleet : Nat → Bool) (k : Nat)
+    (cap : ∀ f, f < w.ferries → fleet f = true → w.slots f ≤ k)
+    (out : Bool) (port : Nat)
+    {s u : State} {A B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s A u B xs m h) :
+    (xs.map (fleetPortAllowance w fleet out port)).sum ≤
+      k*(xs.map (fun e => fleetPortSail fleet out port e.source e.action)).sum := by
+  induction tr with
+  | nil => simp
+  | @cons s t u A B act xs a b m h st rest ih =>
+    have hs := fleet_event_allowance_le w fleet k cap out port st A
+    simp only [List.map_cons,List.sum_cons,Nat.mul_add]
+    omega
+
+theorem fleet_completed_port_budget (w : World) (fleet : Nat → Bool) (k : Nat)
+    (cap : ∀ f, f < w.ferries → fleet f = true → w.slots f ≤ k)
+    (out : Bool) (port : Nat)
+    {s u : State} {B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s (physicalTruck s) u B xs m h)
+    (valid : CarrierInvariant w s) :
+    (xs.map (fleetPortSpent w fleet out port)).sum ≤
+      k*(xs.map (fun e => fleetPortSail fleet out port e.source e.action)).sum := by
+  have h1 : (xs.map (fleetPortSpent w fleet out port)).sum ≤
+      (xs.map (fleetPortAllowance w fleet out port)).sum := by
+    unfold fleetPortSpent fleetPortAllowance
+    rw [sum_map_sumN_commute,sum_map_sumN_commute]
+    apply sumN_mono
+    intro f hf
+    cases he : fleet f with
+    | false => simp [he,sum_map_eq_zero]
+    | true =>
+      simpa [he] using effective_completed_port_budget w tr valid out f port
+  exact Nat.le_trans h1 (fleet_allowance_trace_le w fleet k cap out port tr)
+
+def fleetPortStock (w : World) (fleet : Nat → Bool) (s : State) (port : Nat) : Nat :=
+  sumN (fun f => if fleet f = true ∧ s.ferry f = port then 1 else 0) w.ferries
+
+def fleetBoatCount (w : World) (fleet : Nat → Bool) : Nat :=
+  sumN (fun f => if fleet f then 1 else 0) w.ferries
+
+theorem fleet_port_stock_le (w : World) (fleet : Nat → Bool) (s : State) (port : Nat) :
+    fleetPortStock w fleet s port ≤ fleetBoatCount w fleet := by
+  unfold fleetPortStock fleetBoatCount
+  apply sumN_mono
+  intro f hf
+  cases he : fleet f <;> simp [he]
+  split <;> omega
+
+theorem fleet_port_stock_step (w : World) (fleet : Nat → Bool) (port : Nat)
+    {s u : State} {act : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u act m h) :
+    fleetPortStock w fleet s port + fleetPortSail fleet false port s act =
+      fleetPortStock w fleet u port + fleetPortSail fleet true port s act := by
+  cases st with
+  | sail f b hr hn hv =>
+    let u := {s with ferry := setAt s.ferry f b}
+    have h := stock_sum_replace_balance
+      (fun g => if fleet g = true ∧ s.ferry g = port then 1 else 0)
+      (fun g => if fleet g = true ∧ u.ferry g = port then 1 else 0) f w.ferries hv.1
+      (by intro g hg; simp [u,setAt,hg])
+    change fleetPortStock w fleet s port + (if fleet f = true ∧ u.ferry f = port then 1 else 0) =
+      fleetPortStock w fleet u port + (if fleet f = true ∧ s.ferry f = port then 1 else 0) at h
+    simpa [fleetPortSail,u,setAt] using h
+  | drive => simp [fleetPortSail,fleetPortStock]
+  | board => simp [fleetPortSail,fleetPortStock]
+  | disembark => simp [fleetPortSail,fleetPortStock]
+  | load => simp [fleetPortSail,fleetPortStock]
+  | unload => simp [fleetPortSail,fleetPortStock]
+
+theorem fleet_port_stock_trace (w : World) (fleet : Nat → Bool) (port : Nat)
+    {s u : State} {A B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s A u B xs m h) :
+    fleetPortStock w fleet s port +
+      (xs.map (fun e => fleetPortSail fleet false port e.source e.action)).sum =
+    fleetPortStock w fleet u port +
+      (xs.map (fun e => fleetPortSail fleet true port e.source e.action)).sum := by
+  induction tr with
+  | nil => simp
+  | @cons s t u A B act xs a b m h st rest ih =>
+    have hs := fleet_port_stock_step w fleet port st
+    simp only [List.map_cons,List.sum_cons]
+    omega
+
+-- Instantiate the HubPortTrace witness from actual completed rides and
+-- actual ferry stocks. The two bin bounds are supplied by the chosen
+-- parcel path arc witnesses (hub_arc_bin_from_real_trace).
+def hubPortFromTrace (w : World) (fleet : Nat → Bool) (s : State)
+    (port outgoing incoming : Nat) : HubPort :=
+  ⟨outgoing,incoming,fleetPortStock w fleet s port⟩
+
+theorem hub_port_actual_budget (w : World) (fleet : Nat → Bool) (k : Nat)
+    (cap : ∀ f, f < w.ferries → fleet f = true → w.slots f ≤ k)
+    (positive : 0 < k) (port outgoing incoming : Nat)
+    {s u : State} {B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s (physicalTruck s) u B xs m h)
+    (valid : CarrierInvariant w s)
+    (ho : outgoing ≤ (xs.map (fleetPortSpent w fleet true port)).sum)
+    (hi : incoming ≤ (xs.map (fleetPortSpent w fleet false port)).sum) :
+    hubDepBound k (fleetBoatCount w fleet) (hubPortFromTrace w fleet s port outgoing incoming) ≤
+      (xs.map (fun e => fleetPortSail fleet true port e.source e.action)).sum ∧
+    hubArrBound k (hubPortFromTrace w fleet s port outgoing incoming) ≤
+      (xs.map (fun e => fleetPortSail fleet false port e.source e.action)).sum := by
+  let p := hubPortFromTrace w fleet s port outgoing incoming
+  let depart := (xs.map (fun e => fleetPortSail fleet true port e.source e.action)).sum
+  let arrive := (xs.map (fun e => fleetPortSail fleet false port e.source e.action)).sum
+  let outTrips := (xs.map (fleetPortSpent w fleet true port)).sum
+  let inTrips := (xs.map (fleetPortSpent w fleet false port)).sum
+  let t : HubPortTrace p k (fleetBoatCount w fleet) :=
+    {depart := depart, arrive := arrive, finish := fleetPortStock w fleet u port,
+     tripsOut := outTrips, tripsIn := inTrips, binOut := ho, binIn := hi,
+     sailOut := by
+       have hb := fleet_completed_port_budget w fleet k cap true port tr valid
+       simpa [depart,outTrips,Nat.mul_comm] using hb,
+     sailIn := by
+       have hb := fleet_completed_port_budget w fleet k cap false port tr valid
+       simpa [arrive,inTrips,Nat.mul_comm] using hb,
+     initialStock := fleet_port_stock_le w fleet s port,
+     finalStock := fleet_port_stock_le w fleet u port,
+     balance := by
+       have hb := fleet_port_stock_trace w fleet port tr
+       change depart+fleetPortStock w fleet u port = arrive+fleetPortStock w fleet s port
+       unfold depart arrive
+       omega}
+  simpa only [t,p,depart,arrive] using hub_port_inventory_bound p k (fleetBoatCount w fleet) positive t
+
+#print axioms fleet_completed_port_budget
+#print axioms fleet_port_stock_trace
+#print axioms hub_port_actual_budget
+
+end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Signed integer positions are exactly the source tuple representation:
+-- nonnegative ground location; -(index+1) for a carrier.
+def signedTruck (p : TruckPosition) : Int :=
+  match p with
+  | .land a => Int.ofNat a
+  | .onFerry f => -(Int.ofNat f+1)
+
+def unsignedTruck (a : Int) : TruckPosition :=
+  if a < 0 then .onFerry ((-a-1).toNat) else .land a.toNat
+
+def signedParcel (p : ParcelPosition) : Int :=
+  match p with
+  | .ground a => Int.ofNat a
+  | .onTruck t => -(Int.ofNat t+1)
+
+def unsignedParcel (a : Int) : ParcelPosition :=
+  if a < 0 then .onTruck ((-a-1).toNat) else .ground a.toNat
+
+theorem signed_truck_roundtrip (p : TruckPosition) : unsignedTruck (signedTruck p) = p := by
+  cases p with
+  | land a => simp [signedTruck,unsignedTruck]
+  | onFerry f =>
+    have h0 : 0 ≤ Int.ofNat f := by simp
+    have h : -(Int.ofNat f+1) < 0 := by omega
+    simp [signedTruck,unsignedTruck,h]
+
+theorem signed_parcel_roundtrip (p : ParcelPosition) : unsignedParcel (signedParcel p) = p := by
+  cases p with
+  | ground a => simp [signedParcel,unsignedParcel]
+  | onTruck t =>
+    have h0 : 0 ≤ Int.ofNat t := by simp
+    have h : -(Int.ofNat t+1) < 0 := by omega
+    simp [signedParcel,unsignedParcel,h]
+
+theorem signed_truck_injective {a b : TruckPosition}
+    (he : signedTruck a = signedTruck b) : a=b := by
+  have hh := congrArg unsignedTruck he
+  simpa only [signed_truck_roundtrip] using hh
+
+theorem signed_parcel_injective {a b : ParcelPosition}
+    (he : signedParcel a = signedParcel b) : a=b := by
+  have hh := congrArg unsignedParcel he
+  simpa only [signed_parcel_roundtrip] using hh
+
+def signedStateKey (w : World) (s : State) : List Int :=
+  ((List.range w.trucks).map (fun t => signedTruck (s.truck t))) ++
+  ((List.range w.ferries).map (fun f => Int.ofNat (s.ferry f))) ++
+  ((List.range w.parcels).map (fun p => signedParcel (s.parcel p)))
+
+-- The exact labeled tuple (not the symmetry quotient) is used for hcache
+-- and wrapcache. The component maps are injective on their finite domain.
+theorem signed_state_key_length (w : World) (s : State) :
+    (signedStateKey w s).length = w.trucks+w.ferries+w.parcels := by
+  simp [signedStateKey,Nat.add_assoc]
+
+theorem load_le_total_weight (w : World) (s : State) (t : Nat) :
+    load w s t ≤ sumN w.weight w.parcels := by
+  unfold load
+  apply sumN_mono
+  intro p hp
+  split <;> omega
+
+theorem occupancy_le_truck_count (w : World) (s : State) (f : Nat) :
+    occupancy w s f ≤ w.trucks := by
+  have hc : sumN (fun _ => 1) w.trucks = w.trucks := by
+    generalize w.trucks = n
+    induction n with
+    | zero => rfl
+    | succ n ih => simp [sumN,ih]
+  rw [← hc]
+  unfold occupancy
+  apply sumN_mono
+  intro t ht
+  split <;> omega
+
+def clipWorld (w : World) : World :=
+  {w with capacity := fun t => min (w.capacity t) (sumN w.weight w.parcels),
+          slots := fun f => min (w.slots f) w.trucks}
+
+-- Clipping capacities by total mass and truck count cannot invalidate
+-- a legal LOAD or BOARD, even for weight zero or capacity zero.
+theorem capacity_clip_load (w : World) (s : State) (p t a : Nat)
+    (hp : p < w.parcels) (hg : s.parcel p = .ground a)
+    (room : load w s t+w.weight p ≤ w.capacity t) :
+    load (clipWorld w) s t+w.weight p ≤ (clipWorld w).capacity t := by
+  have hb := load_le_total_weight w {s with parcel := setAt s.parcel p (.onTruck t)} t
+  rw [load_after_load w s p t a hp hg] at hb
+  change load w s t+w.weight p ≤ min (w.capacity t) (sumN w.weight w.parcels)
+  omega
+
+theorem capacity_clip_board (w : World) (s : State) (t f a : Nat)
+    (ht : t < w.trucks) (hg : s.truck t = .land a)
+    (room : occupancy w s f < w.slots f) :
+    occupancy (clipWorld w) s f < (clipWorld w).slots f := by
+  have hb := occupancy_le_truck_count w {s with truck := setAt s.truck t (.onFerry f)} f
+  rw [occupancy_after_board w s t f a ht hg] at hb
+  change occupancy w s f < min (w.slots f) w.trucks
+  omega
+
+theorem clip_step_equiv (w : World) {s u : State} {m h : Nat} :
+    Step w s u m h ↔ Step (clipWorld w) s u m h := by
+  constructor
+  · intro st
+    cases st with
+    | drive t a b ht hr hv => exact Step.drive s t a b ht hr hv
+    | board t f a ht hf hr room hv =>
+      exact Step.board s t f a ht hf hr (capacity_clip_board w s t f a hv.1 ht room) hv
+    | disembark t f ht hv => exact Step.disembark s t f ht hv
+    | sail f b hr hn hv => exact Step.sail s f b hr hn hv
+    | load p t a hp ht room hv =>
+      exact Step.load s p t a hp ht (capacity_clip_load w s p t a hv.1 hp room) hv
+    | unload p t a hp ht hv => exact Step.unload s p t a hp ht hv
+  · intro st
+    cases st with
+    | drive t a b ht hr hv => exact Step.drive s t a b ht hr hv
+    | board t f a ht hf hr room hv =>
+      change occupancy w s f < min (w.slots f) w.trucks at room
+      exact Step.board s t f a ht hf hr (by omega) hv
+    | disembark t f ht hv => exact Step.disembark s t f ht hv
+    | sail f b hr hn hv => exact Step.sail s f b hr hn hv
+    | load p t a hp ht room hv =>
+      change load w s t+w.weight p ≤ min (w.capacity t) (sumN w.weight w.parcels) at room
+      exact Step.load s p t a hp ht (by omega) hv
+    | unload p t a hp ht hv => exact Step.unload s p t a hp ht hv
+
+theorem clip_path_equiv (w : World) {s u : State} {m h : Nat} :
+    Path (Step w) s u m h ↔ Path (Step (clipWorld w)) s u m h := by
+  constructor
+  · intro p
+    induction p with
+    | nil s => exact Path.nil s
+    | cons st rest ih => exact Path.cons ((clip_step_equiv w).mp st) ih
+  · intro p
+    induction p with
+    | nil s => exact Path.nil s
+    | cons st rest ih => exact Path.cons ((clip_step_equiv w).mpr st) ih
+
+#print axioms signed_truck_roundtrip
+#print axioms signed_parcel_roundtrip
+#print axioms clip_step_equiv
+#print axioms clip_path_equiv
+
 end IslandLogistics
