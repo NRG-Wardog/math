@@ -11993,17 +11993,17 @@ theorem signed_truck_roundtrip (p : TruckPosition) : unsignedTruck (signedTruck 
   cases p with
   | land a => simp [signedTruck,unsignedTruck]
   | onFerry f =>
+    have h0 : 0 ≤ Int.ofNat f := by simp
     have h : -(Int.ofNat f+1) < 0 := by omega
     simp [signedTruck,unsignedTruck,h]
-    omega
 
 theorem signed_parcel_roundtrip (p : ParcelPosition) : unsignedParcel (signedParcel p) = p := by
   cases p with
   | ground a => simp [signedParcel,unsignedParcel]
   | onTruck t =>
+    have h0 : 0 ≤ Int.ofNat t := by simp
     have h : -(Int.ofNat t+1) < 0 := by omega
     simp [signedParcel,unsignedParcel,h]
-    omega
 
 theorem signed_truck_injective {a b : TruckPosition}
     (he : signedTruck a = signedTruck b) : a=b := by
