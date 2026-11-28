@@ -11362,3 +11362,254 @@ def certifiedBridgeSystem (w : World) (cs : List (BridgeSideCertificate w))
 #print axioms certifiedBridgeSystem
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- The final checks in Pattern, StockRidePattern and SailingPattern
+-- certify the result independently of the relaxation schedule.
+def bellmanCheck (d : Nat → Nat) (arcs : List BellmanArc) (goals : List Nat) : Bool :=
+  arcs.all (fun e => decide (d e.src ≤ e.cost+d e.dst)) &&
+  goals.all (fun g => decide (d g = 0))
+
+theorem bellman_check_edge (d : Nat → Nat) (arcs : List BellmanArc) (goals : List Nat)
+    (ok : bellmanCheck d arcs goals = true) (e : BellmanArc) (he : e ∈ arcs) :
+    d e.src ≤ e.cost+d e.dst := by
+  have h : arcs.all (fun e => decide (d e.src ≤ e.cost+d e.dst)) = true := by
+    unfold bellmanCheck at ok
+    cases ha : arcs.all (fun e => decide (d e.src ≤ e.cost+d e.dst)) <;> simp [ha] at ok ⊢
+  have hb := List.all_eq_true.mp h e he
+  simpa using hb
+
+theorem bellman_check_goal (d : Nat → Nat) (arcs : List BellmanArc) (goals : List Nat)
+    (ok : bellmanCheck d arcs goals = true) (g : Nat) (hg : g ∈ goals) : d g = 0 := by
+  have h : goals.all (fun g => decide (d g = 0)) = true := by
+    unfold bellmanCheck at ok
+    cases ha : goals.all (fun g => decide (d g = 0)) <;> simp [ha] at ok ⊢
+  have hb := List.all_eq_true.mp h g hg
+  simpa using hb
+
+def CheckedArcStep (arcs : List BellmanArc) (s t a b : Nat) : Prop :=
+  b = 0 ∧ (⟨s,t,a⟩ : BellmanArc) ∈ arcs
+
+theorem checked_pdb_path_bound (d : Nat → Nat) (arcs : List BellmanArc) (goals : List Nat)
+    (ok : bellmanCheck d arcs goals = true)
+    {s t m h : Nat} (p : Path (CheckedArcStep arcs) s t m h) (hg : t ∈ goals) :
+    d s ≤ m := by
+  have hstep : ∀ s t a b, CheckedArcStep arcs s t a b → d s ≤ a+d t := by
+    intro s t a b st
+    exact bellman_check_edge d arcs goals ok _ st.2
+  have hb := potential_bound d hstep p
+  have hz := bellman_check_goal d arcs goals ok t hg
+  omega
+
+-- Translating by fixed counts is injective on legal source vectors,
+-- regardless of overlap between the source and destination index sets.
+-- Use this for advanced indexing, not an unjustified uniqueness
+-- assumption about the batches.
+def countTransfer (x : Nat → Nat) (a b amount : Nat) : Nat → Nat :=
+  fun z => x z - (if z = a then amount else 0) + (if z = b then amount else 0)
+
+theorem count_transfer_balance (x : Nat → Nat) (a b amount z : Nat) (fit : amount ≤ x a) :
+    countTransfer x a b amount z + (if z = a then amount else 0) =
+      x z + (if z = b then amount else 0) := by
+  unfold countTransfer
+  by_cases he : z = a
+  · subst z
+    simp only [if_pos rfl]
+    have heq : a = a := rfl
+    simp [heq]
+    omega
+  · simp [he]
+
+theorem count_transfer_injective (x y : Nat → Nat) (a b amount : Nat)
+    (hx : amount ≤ x a) (hy : amount ≤ y a)
+    (eq : countTransfer x a b amount = countTransfer y a b amount) : x = y := by
+  funext z
+  have h1 := count_transfer_balance x a b amount z hx
+  have h2 := count_transfer_balance y a b amount z hy
+  have h3 := congrFun eq z
+  omega
+
+theorem count_transfer_reverse (x : Nat → Nat) (a b amount : Nat) (fit : amount ≤ x a) :
+    countTransfer (countTransfer x a b amount) b a amount = x := by
+  have hb : amount ≤ countTransfer x a b amount b := by
+    unfold countTransfer
+    by_cases he : b = a
+    · subst b
+      simp
+      omega
+    · simp [he]
+  funext z
+  have h1 := count_transfer_balance x a b amount z fit
+  have h2 := count_transfer_balance (countTransfer x a b amount) b a amount z hb
+  omega
+
+-- Exact pointwise minimum and saturated addition used by the array
+-- route recurrence and reduceat convolution.  Infinity maps to TOP.
+def cappedPlus (top a b : Nat) : Nat := min top (a+b)
+
+theorem capped_plus_opt (top : Nat) (a b : Option Nat) :
+    cappedPlus top (metricCap top a) (metricCap top b) =
+      metricCap top (metricOptAdd a b) := (metric_cap_add top a b).symm
+
+def optFoldMin : List (Option Nat) → Option Nat
+  | [] => none
+  | a::as => metricOptMin a (optFoldMin as)
+
+theorem cap_fold_min (top : Nat) (xs : List (Option Nat)) :
+    metricCap top (optFoldMin xs) = minCandidate top (xs.map (metricCap top)) := by
+  induction xs with
+  | nil => rfl
+  | cons a as ih =>
+    simp only [optFoldMin,minCandidate,List.map_cons,metric_cap_min,ih]
+
+theorem capped_minplus_exact (top : Nat) (xs : List (Option Nat × Option Nat)) :
+    metricCap top (optFoldMin (xs.map (fun ab => metricOptAdd ab.1 ab.2))) =
+      minCandidate top (xs.map (fun ab => cappedPlus top (metricCap top ab.1) (metricCap top ab.2))) := by
+  rw [cap_fold_min,List.map_map]
+  simp only [Function.comp_def,metric_cap_add,cappedPlus]
+
+theorem cap_top_skippable (top x : Nat) : cappedPlus top top x = top := by
+  unfold cappedPlus
+  omega
+
+theorem signed64_route_add_safe (top a b : Nat) (ht : top ≤ 2^60)
+    (ha : a ≤ top) (hb : b ≤ top) : a+b < 2^63 := by omega
+
+-- DirectCutAssignments guard, including intermediate costs of all
+-- disjoint subtrees.  The int16 guard is slightly tighter than a
+-- uniform factor-eight estimate; enumerate the bounded parameters
+-- symbolically, not any assignment fixtures.
+theorem direct_int16_guard (nb scale P T : Nat)
+    (hn : 1 ≤ nb ∧ nb ≤ 149) (hs : 1 ≤ scale ∧ scale ≤ 2)
+    (hp : 2 ≤ P ∧ P ≤ 6) (ht : 2 ≤ T ∧ T ≤ 4)
+    (guard : nb*6*scale*(2*P+2*T+1) < 30000) :
+    (nb-1)*8*scale*(2*P+T) < 32768 := by
+  have sp : scale = 1 ∨ scale = 2 := by omega
+  have pp : P = 2 ∨ P = 3 ∨ P = 4 ∨ P = 5 ∨ P = 6 := by omega
+  have tt : T = 2 ∨ T = 3 ∨ T = 4 := by omega
+  rcases sp with rfl | rfl <;>
+    rcases pp with rfl | rfl | rfl | rfl | rfl <;>
+    rcases tt with rfl | rfl | rfl <;> omega
+
+theorem direct_int32_guard (nb scale P T : Nat)
+    (hn : nb ≤ 149) (hs : scale ≤ 4096) (hp : P ≤ 6) (ht : T ≤ 4) :
+    (nb-1)*8*scale*(2*P+T) < 2^31 := by
+  have h1 : nb-1 ≤ 148 := by omega
+  have h2 : 2*P+T ≤ 16 := by omega
+  have hb : (nb-1)*8*scale*(2*P+T) ≤ 148*8*4096*16 :=
+    Nat.mul_le_mul (Nat.mul_le_mul (Nat.mul_le_mul_right 8 h1) hs) h2
+  omega
+
+-- The per-class Pattern load guard bounds even the extra proposal to
+-- LOAD a package, before it is rejected by capacity.
+theorem pattern_load_proposal_guard (W count total next : Nat)
+    (hn : 1 ≤ count) (ht : total ≤ W*count) (hw : next ≤ W)
+    (guard : W*count < 2^60) :
+    total+next < 2^61 := by
+  have hW := Nat.mul_le_mul_left W hn
+  rw [Nat.mul_one] at hW
+  omega
+
+-- The final max/min composition of the actual three evaluator branches.
+-- Each assignment candidate has the form 2*r + max(move,route+extra).
+-- A path supplies one admitted column. The scalar formula is independent
+-- of the evaluation order, the cache or the greedy optional-work gate.
+def maxCandidates : List Nat → Nat
+  | [] => 0
+  | x::xs => max x (maxCandidates xs)
+
+theorem max_candidates_le (xs : List Nat) (budget : Nat)
+    (h : ∀ x ∈ xs, x ≤ budget) : maxCandidates xs ≤ budget := by
+  induction xs with
+  | nil => simp [maxCandidates]
+  | cons x xs ih =>
+    exact max_bound x (maxCandidates xs) budget (h x (by simp))
+      (ih (fun y hy => h y (List.mem_cons_of_mem _ hy)))
+
+structure TransferColumn where
+  omitted : Nat
+  route : Nat
+  extra : Nat
+
+def columnCost (move : Nat) (x : TransferColumn) : Nat :=
+  2*x.omitted+max move (x.route+x.extra)
+
+def transferMinimum (top move : Nat) (cols : List TransferColumn) : Nat :=
+  minCandidate top (cols.map (columnCost move))
+
+theorem transfer_minimum_witness (top move m e : Nat) (cols : List TransferColumn)
+    (hm : move ≤ m) (witness : ∃ x ∈ cols, 2*x.omitted ≤ e ∧ x.route+x.extra ≤ m) :
+    transferMinimum top move cols ≤ m+e := by
+  obtain ⟨x,hx,he,hr⟩ := witness
+  have h1 := minCandidate_le_member top (cols.map (columnCost move)) (columnCost move x)
+    (List.mem_map.mpr ⟨x,hx,rfl⟩)
+  have h2 := max_bound move (x.route+x.extra) m hm hr
+  unfold transferMinimum columnCost at *
+  omega
+
+def candidateOrdinary (H move : Nat) (columns : List (List TransferColumn)) (top : Nat) : Nat :=
+  H+max move (maxCandidates (columns.map (transferMinimum top move)))
+
+theorem candidate_ordinary_path (w : World) {s u : State} {m h e : Nat}
+    (path : ResidualPath w s u m h e) (done : Goal w u)
+    (move top : Nat) (columns : List (List TransferColumn))
+    (hm : move ≤ m)
+    (witness : ∀ cs ∈ columns, ∃ x ∈ cs, 2*x.omitted ≤ e ∧ x.route+x.extra ≤ m) :
+    candidateOrdinary (handling w s) move columns top ≤ m+h := by
+  have hc : maxCandidates (columns.map (transferMinimum top move)) ≤ m+e := by
+    apply max_candidates_le
+    intro y hy
+    obtain ⟨cs,hcs,rfl⟩ := List.mem_map.mp hy
+    exact transfer_minimum_witness top move m e cs hm (witness cs hcs)
+  have hh := residual_goal_budget w path done
+  have hmax := max_bound move (maxCandidates (columns.map (transferMinimum top move))) (m+e)
+    (by omega) hc
+  unfold candidateOrdinary
+  omega
+
+inductive EvaluatorBranch where
+  | zero
+  | geographic (value : Nat)
+  | virtual (columns : List TransferColumn)
+  | ordinary (move : Nat) (columns : List (List TransferColumn))
+
+def evalBranch (top H : Nat) : EvaluatorBranch → Nat
+  | .zero => 0
+  | .geographic v => H+v
+  | .virtual cs => H+transferMinimum top 0 cs
+  | .ordinary move cs => candidateOrdinary H move cs top
+
+def EvaluatorWitness (m e : Nat) : EvaluatorBranch → Prop
+  | .zero => True
+  | .geographic v => v ≤ m+e
+  | .virtual cs => ∃ x ∈ cs, 2*x.omitted ≤ e ∧ x.route+x.extra ≤ m
+  | .ordinary move cs => move ≤ m ∧
+      ∀ c ∈ cs, ∃ x ∈ c, 2*x.omitted ≤ e ∧ x.route+x.extra ≤ m
+
+theorem evaluator_branch_path (w : World) {s u : State} {m h e : Nat}
+    (path : ResidualPath w s u m h e) (done : Goal w u)
+    (top : Nat) (branch : EvaluatorBranch) (witness : EvaluatorWitness m e branch) :
+    evalBranch top (handling w s) branch ≤ m+h := by
+  cases branch with
+  | zero => exact Nat.zero_le _
+  | geographic v => exact geographic_budget_admissible w path done v witness
+  | virtual cs =>
+    have h1 := transfer_minimum_witness top 0 m e cs (Nat.zero_le _) witness
+    have h2 := residual_goal_budget w path done
+    simp only [evalBranch]
+    omega
+  | ordinary move cs =>
+    exact candidate_ordinary_path w path done move top cs witness.1 witness.2
+
+#print axioms checked_pdb_path_bound
+#print axioms count_transfer_injective
+#print axioms count_transfer_reverse
+#print axioms capped_minplus_exact
+#print axioms direct_int16_guard
+#print axioms direct_int32_guard
+#print axioms pattern_load_proposal_guard
+#print axioms evaluator_branch_path
+
+end IslandLogistics
