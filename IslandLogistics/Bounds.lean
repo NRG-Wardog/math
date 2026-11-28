@@ -11781,3 +11781,188 @@ theorem full_loaded_ferry_priority (w : World) (f t p : Nat)
 #print axioms full_loaded_ferry_priority
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Fleet aggregation of the already checked per-ferry completed-ride
+-- credit. This is the fleet grouping used by HubFlow, not a different
+-- abstract schedule for each port.
+def fleetPortSail (fleet : Nat → Bool) (out : Bool) (port : Nat)
+    (s : State) (act : ActionLabel) : Nat :=
+  match act with
+  | .sail f b => if fleet f = true ∧ (if out then s.ferry f = port else b = port)
+      then 1 else 0
+  | _ => 0
+
+def fleetPortSpent (w : World) (fleet : Nat → Bool) (out : Bool) (port : Nat)
+    (e : EffectiveEvent) : Nat :=
+  sumN (fun f => if fleet f then portSpendSum w out f port e.source e.anchor e.action
+    else 0) w.ferries
+
+def fleetPortAllowance (w : World) (fleet : Nat → Bool) (out : Bool) (port : Nat)
+    (e : EffectiveEvent) : Nat :=
+  sumN (fun f => if fleet f then portSailAllowance w out f port e.source e.action
+    else 0) w.ferries
+
+theorem sum_map_sumN_commute {α : Type} (xs : List α) (n : Nat) (v : α → Nat → Nat) :
+    (xs.map (fun e => sumN (v e) n)).sum =
+      sumN (fun f => (xs.map (fun e => v e f)).sum) n := by
+  induction xs with
+  | nil => simp [sumN_zero]
+  | cons e es ih =>
+    simp only [List.map_cons,List.sum_cons,ih]
+    rw [sumN_add]
+
+theorem fleet_event_allowance_le (w : World) (fleet : Nat → Bool) (k : Nat)
+    (cap : ∀ f, f < w.ferries → fleet f = true → w.slots f ≤ k)
+    (out : Bool) (port : Nat)
+    {s u : State} {a : ActionLabel} {m h : Nat} (st : LabelStep w s u a m h)
+    (A : Nat → Nat) :
+    fleetPortAllowance w fleet out port ⟨s,A,a⟩ ≤ k*fleetPortSail fleet out port s a := by
+  cases st with
+  | sail f b hr hn hv =>
+    unfold fleetPortAllowance
+    rw [sumN_single _ _ f hv.1 (by intro g hg hne; simp [portSailAllowance,Ne.symm hne])]
+    by_cases hf : fleet f = true
+    · have hcap := cap f hv.1 hf
+      by_cases hp : (if out then s.ferry f = port else b = port)
+      · simp [portSailAllowance,fleetPortSail,hf,hp,hcap]
+      · simp [portSailAllowance,fleetPortSail,hf,hp]
+    · have hf' : fleet f = false := by cases he : fleet f <;> simp_all
+      simp [portSailAllowance,fleetPortSail,hf']
+  | drive => simp [fleetPortAllowance,portSailAllowance,fleetPortSail,sumN_zero]
+  | board => simp [fleetPortAllowance,portSailAllowance,fleetPortSail,sumN_zero]
+  | disembark => simp [fleetPortAllowance,portSailAllowance,fleetPortSail,sumN_zero]
+  | load => simp [fleetPortAllowance,portSailAllowance,fleetPortSail,sumN_zero]
+  | unload => simp [fleetPortAllowance,portSailAllowance,fleetPortSail,sumN_zero]
+
+theorem fleet_allowance_trace_le (w : World) (fleet : Nat → Bool) (k : Nat)
+    (cap : ∀ f, f < w.ferries → fleet f = true → w.slots f ≤ k)
+    (out : Bool) (port : Nat)
+    {s u : State} {A B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s A u B xs m h) :
+    (xs.map (fleetPortAllowance w fleet out port)).sum ≤
+      k*(xs.map (fun e => fleetPortSail fleet out port e.source e.action)).sum := by
+  induction tr with
+  | nil => simp
+  | @cons s t u A B act xs a b m h st rest ih =>
+    have hs := fleet_event_allowance_le w fleet k cap out port st A
+    simp only [List.map_cons,List.sum_cons,Nat.mul_add]
+    omega
+
+theorem fleet_completed_port_budget (w : World) (fleet : Nat → Bool) (k : Nat)
+    (cap : ∀ f, f < w.ferries → fleet f = true → w.slots f ≤ k)
+    (out : Bool) (port : Nat)
+    {s u : State} {B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s (physicalTruck s) u B xs m h)
+    (valid : CarrierInvariant w s) :
+    (xs.map (fleetPortSpent w fleet out port)).sum ≤
+      k*(xs.map (fun e => fleetPortSail fleet out port e.source e.action)).sum := by
+  have h1 : (xs.map (fleetPortSpent w fleet out port)).sum ≤
+      (xs.map (fleetPortAllowance w fleet out port)).sum := by
+    unfold fleetPortSpent fleetPortAllowance
+    rw [sum_map_sumN_commute,sum_map_sumN_commute]
+    apply sumN_mono
+    intro f hf
+    cases he : fleet f with
+    | false => simp [he,sum_map_eq_zero]
+    | true =>
+      simpa [he] using effective_completed_port_budget w tr valid out f port
+  exact Nat.le_trans h1 (fleet_allowance_trace_le w fleet k cap out port tr)
+
+def fleetPortStock (w : World) (fleet : Nat → Bool) (s : State) (port : Nat) : Nat :=
+  sumN (fun f => if fleet f = true ∧ s.ferry f = port then 1 else 0) w.ferries
+
+def fleetBoatCount (w : World) (fleet : Nat → Bool) : Nat :=
+  sumN (fun f => if fleet f then 1 else 0) w.ferries
+
+theorem fleet_port_stock_le (w : World) (fleet : Nat → Bool) (s : State) (port : Nat) :
+    fleetPortStock w fleet s port ≤ fleetBoatCount w fleet := by
+  unfold fleetPortStock fleetBoatCount
+  apply sumN_mono
+  intro f hf
+  cases he : fleet f <;> simp [he]
+
+theorem fleet_port_stock_step (w : World) (fleet : Nat → Bool) (port : Nat)
+    {s u : State} {act : ActionLabel} {m h : Nat}
+    (st : LabelStep w s u act m h) :
+    fleetPortStock w fleet s port + fleetPortSail fleet false port s act =
+      fleetPortStock w fleet u port + fleetPortSail fleet true port s act := by
+  cases st with
+  | sail f b hr hn hv =>
+    let u := {s with ferry := setAt s.ferry f b}
+    have h := stock_sum_replace_balance
+      (fun g => if fleet g = true ∧ s.ferry g = port then 1 else 0)
+      (fun g => if fleet g = true ∧ u.ferry g = port then 1 else 0) f w.ferries hv.1
+      (by intro g hg; simp [u,setAt,hg])
+    change fleetPortStock w fleet s port + (if fleet f = true ∧ u.ferry f = port then 1 else 0) =
+      fleetPortStock w fleet u port + (if fleet f = true ∧ s.ferry f = port then 1 else 0) at h
+    simpa [fleetPortSail,u,setAt] using h
+  | drive => simp [fleetPortSail,fleetPortStock]
+  | board => simp [fleetPortSail,fleetPortStock]
+  | disembark => simp [fleetPortSail,fleetPortStock]
+  | load => simp [fleetPortSail,fleetPortStock]
+  | unload => simp [fleetPortSail,fleetPortStock]
+
+theorem fleet_port_stock_trace (w : World) (fleet : Nat → Bool) (port : Nat)
+    {s u : State} {A B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s A u B xs m h) :
+    fleetPortStock w fleet s port +
+      (xs.map (fun e => fleetPortSail fleet false port e.source e.action)).sum =
+    fleetPortStock w fleet u port +
+      (xs.map (fun e => fleetPortSail fleet true port e.source e.action)).sum := by
+  induction tr with
+  | nil => simp
+  | @cons s t u A B act xs a b m h st rest ih =>
+    have hs := fleet_port_stock_step w fleet port st
+    simp only [List.map_cons,List.sum_cons]
+    omega
+
+-- Instantiate the HubPortTrace witness from actual completed rides and
+-- actual ferry stocks. The two bin bounds are supplied by the chosen
+-- parcel path arc witnesses (hub_arc_bin_from_real_trace).
+def hubPortFromTrace (w : World) (fleet : Nat → Bool) (s : State)
+    (port outgoing incoming : Nat) : HubPort :=
+  ⟨outgoing,incoming,fleetPortStock w fleet s port⟩
+
+theorem hub_port_actual_budget (w : World) (fleet : Nat → Bool) (k : Nat)
+    (cap : ∀ f, f < w.ferries → fleet f = true → w.slots f ≤ k)
+    (positive : 0 < k) (port outgoing incoming : Nat)
+    {s u : State} {B : Nat → Nat} {xs : List EffectiveEvent} {m h : Nat}
+    (tr : EffectiveTrace w s (physicalTruck s) u B xs m h)
+    (valid : CarrierInvariant w s)
+    (ho : outgoing ≤ (xs.map (fleetPortSpent w fleet true port)).sum)
+    (hi : incoming ≤ (xs.map (fleetPortSpent w fleet false port)).sum) :
+    hubDepBound k (fleetBoatCount w fleet) (hubPortFromTrace w fleet s port outgoing incoming) ≤
+      (xs.map (fun e => fleetPortSail fleet true port e.source e.action)).sum ∧
+    hubArrBound k (hubPortFromTrace w fleet s port outgoing incoming) ≤
+      (xs.map (fun e => fleetPortSail fleet false port e.source e.action)).sum := by
+  let p := hubPortFromTrace w fleet s port outgoing incoming
+  let depart := (xs.map (fun e => fleetPortSail fleet true port e.source e.action)).sum
+  let arrive := (xs.map (fun e => fleetPortSail fleet false port e.source e.action)).sum
+  let outTrips := (xs.map (fleetPortSpent w fleet true port)).sum
+  let inTrips := (xs.map (fleetPortSpent w fleet false port)).sum
+  have t : HubPortTrace p k (fleetBoatCount w fleet) :=
+    {depart := depart, arrive := arrive, finish := fleetPortStock w fleet u port,
+     tripsOut := outTrips, tripsIn := inTrips, binOut := ho, binIn := hi,
+     sailOut := by
+       have hb := fleet_completed_port_budget w fleet k cap true port tr valid
+       simpa [depart,outTrips,Nat.mul_comm] using hb,
+     sailIn := by
+       have hb := fleet_completed_port_budget w fleet k cap false port tr valid
+       simpa [arrive,inTrips,Nat.mul_comm] using hb,
+     initialStock := fleet_port_stock_le w fleet s port,
+     finalStock := fleet_port_stock_le w fleet u port,
+     balance := by
+       have hb := fleet_port_stock_trace w fleet port tr
+       change depart+fleetPortStock w fleet u port = arrive+fleetPortStock w fleet s port
+       unfold depart arrive
+       omega}
+  exact hub_port_inventory_bound p k (fleetBoatCount w fleet) positive t
+
+#print axioms fleet_completed_port_budget
+#print axioms fleet_port_stock_trace
+#print axioms hub_port_actual_budget
+
+end IslandLogistics
