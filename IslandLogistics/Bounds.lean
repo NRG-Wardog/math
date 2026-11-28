@@ -10889,3 +10889,479 @@ theorem wr_optimal (r : WorldRename w) (s : State) (cost : Nat) :
 #print axioms wr_optimal
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Floyd's recurrence as actually used by metric().  A finite cap is
+-- permitted: projection from the extended arithmetic commutes with min
+-- and truncated addition.  No claim of equality to an unbounded
+-- optimum is needed to obtain a lower-bound certificate.
+def floydPhase (d : Nat → Nat → Nat) (k : Nat) (i j : Nat) : Nat :=
+  min (d i j) (d i k+d k j)
+
+def floydRun (d : Nat → Nat → Nat) : List Nat → Nat → Nat → Nat
+  | [] => d
+  | k::ks => floydRun (floydPhase d k) ks
+
+theorem floyd_phase_le (d : Nat → Nat → Nat) (k i j : Nat) :
+    floydPhase d k i j ≤ d i j := Nat.min_le_left _ _
+
+theorem floyd_phase_diag (d : Nat → Nat → Nat) (zero : ∀ i, d i i = 0) (k i : Nat) :
+    floydPhase d k i i = 0 := by
+  simp [floydPhase,zero i]
+
+theorem floyd_phase_pivot (d : Nat → Nat → Nat) (k : Nat) (zero : d k k = 0) :
+    (∀ i, floydPhase d k i k = d i k) ∧
+    (∀ j, floydPhase d k k j = d k j) := by
+  constructor <;> intro i <;> simp [floydPhase,zero]
+
+theorem floyd_phase_new_triangle (d : Nat → Nat → Nat) (k : Nat) (zero : d k k = 0) :
+    ∀ i j, floydPhase d k i j ≤ floydPhase d k i k + floydPhase d k k j := by
+  intro i j
+  rw [(floyd_phase_pivot d k zero).1 i,(floyd_phase_pivot d k zero).2 j]
+  exact Nat.min_le_right _ _
+
+theorem floyd_phase_old_triangle (d : Nat → Nat → Nat) (k l : Nat)
+    (old : ∀ i j, d i j ≤ d i l + d l j) :
+    ∀ i j, floydPhase d k i j ≤ floydPhase d k i l + floydPhase d k l j := by
+  intro i j
+  have h0 := old i j
+  have h1 := old k j
+  have h2 := old i k
+  have ha : floydPhase d k i j ≤ d i j := Nat.min_le_left _ _
+  have hb : floydPhase d k i j ≤ d i k+d k j := Nat.min_le_right _ _
+  unfold floydPhase at *
+  by_cases h : d i l ≤ d i k+d k l
+  · rw [Nat.min_eq_left h]
+    by_cases q : d l j ≤ d l k+d k j
+    · rw [Nat.min_eq_left q]
+      omega
+    · rw [Nat.min_eq_right (by omega : d l k+d k j ≤ d l j)]
+      omega
+  · rw [Nat.min_eq_right (by omega : d i k+d k l ≤ d i l)]
+    by_cases q : d l j ≤ d l k+d k j
+    · rw [Nat.min_eq_left q]
+      omega
+    · rw [Nat.min_eq_right (by omega : d l k+d k j ≤ d l j)]
+      omega
+
+theorem floyd_run_le (d : Nat → Nat → Nat) (ks : List Nat) (i j : Nat) :
+    floydRun d ks i j ≤ d i j := by
+  induction ks generalizing d with
+  | nil => exact Nat.le_refl _
+  | cons k ks ih =>
+    exact Nat.le_trans (ih (floydPhase d k)) (floyd_phase_le d k i j)
+
+theorem floyd_run_diag (d : Nat → Nat → Nat) (ks : List Nat) (zero : ∀ i, d i i = 0) :
+    ∀ i, floydRun d ks i i = 0 := by
+  induction ks generalizing d with
+  | nil => exact zero
+  | cons k ks ih =>
+    exact ih (floydPhase d k) (floyd_phase_diag d zero k)
+
+theorem floyd_run_preserves_triangle (d : Nat → Nat → Nat) (ks : List Nat) (l : Nat)
+    (tri : ∀ i j, d i j ≤ d i l + d l j) :
+    ∀ i j, floydRun d ks i j ≤ floydRun d ks i l + floydRun d ks l j := by
+  induction ks generalizing d with
+  | nil => exact tri
+  | cons k ks ih =>
+    exact ih (floydPhase d k) (floyd_phase_old_triangle d k l tri)
+
+theorem floyd_run_triangle (d : Nat → Nat → Nat) (ks : List Nat)
+    (zero : ∀ i, d i i = 0) (l : Nat) (mem : l ∈ ks) :
+    ∀ i j, floydRun d ks i j ≤ floydRun d ks i l + floydRun d ks l j := by
+  induction ks generalizing d with
+  | nil => simp at mem
+  | cons k ks ih =>
+    rcases List.mem_cons.mp mem with he | ht
+    · subst l
+      exact floyd_run_preserves_triangle (floydPhase d k) ks k
+        (floyd_phase_new_triangle d k (zero k))
+    · exact ih (floydPhase d k) (floyd_phase_diag d zero k) ht
+
+theorem floyd_run_sym (d : Nat → Nat → Nat) (ks : List Nat)
+    (sym : ∀ i j, d i j = d j i) :
+    ∀ i j, floydRun d ks i j = floydRun d ks j i := by
+  induction ks generalizing d with
+  | nil => exact sym
+  | cons k ks ih =>
+    apply ih
+    intro i j
+    unfold floydPhase
+    have h1 := sym i j
+    have h2 := sym i k
+    have h3 := sym k j
+    rw [h1,h2,h3,Nat.add_comm]
+
+-- In-place updates do not change the pivot row or column because
+-- diagonal entries are zero. Updating any cell twice is harmless.
+def floydWrite (d : Nat → Nat → Nat) (k : Nat) (cell : Nat × Nat)
+    (i j : Nat) : Nat :=
+  if (i,j) = cell then floydPhase d k i j else d i j
+
+theorem floyd_write_pivot (d : Nat → Nat → Nat) (k : Nat) (cell : Nat × Nat)
+    (zero : d k k = 0) :
+    (∀ i, floydWrite d k cell i k = d i k) ∧
+    (∀ j, floydWrite d k cell k j = d k j) := by
+  constructor
+  · intro i
+    unfold floydWrite
+    rw [(floyd_phase_pivot d k zero).1 i]
+    split <;> rfl
+  · intro j
+    unfold floydWrite
+    rw [(floyd_phase_pivot d k zero).2 j]
+    split <;> rfl
+
+theorem floyd_write_phase (d : Nat → Nat → Nat) (k : Nat) (cell : Nat × Nat)
+    (zero : d k k = 0) (i j : Nat) :
+    floydPhase (floydWrite d k cell) k i j = floydPhase d k i j := by
+  unfold floydPhase
+  rw [(floyd_write_pivot d k cell zero).1 i,(floyd_write_pivot d k cell zero).2 j]
+  unfold floydWrite
+  split
+  · simp only [floydPhase]
+    omega
+  · rfl
+
+def floydCells (d : Nat → Nat → Nat) (k : Nat) : List (Nat × Nat) → Nat → Nat → Nat
+  | [] => d
+  | c::cs => floydCells (floydWrite d k c) k cs
+
+theorem floyd_cells_exact (d : Nat → Nat → Nat) (k : Nat) (cells : List (Nat × Nat))
+    (zero : d k k = 0) (i j : Nat) :
+    floydCells d k cells i j =
+      if (i,j) ∈ cells then floydPhase d k i j else d i j := by
+  induction cells generalizing d with
+  | nil => simp [floydCells]
+  | cons c cs ih =>
+    have hz : floydWrite d k c k k = 0 :=
+      ((floyd_write_pivot d k c zero).1 k).trans zero
+    simp only [floydCells]
+    rw [ih (floydWrite d k c) hz,floyd_write_phase d k c zero]
+    by_cases he : (i,j) ∈ cs
+    · simp [he]
+    · simp [he,floydWrite]
+
+def metricCap (top : Nat) : Option Nat → Nat
+  | none => top
+  | some x => min top x
+
+def metricOptMin : Option Nat → Option Nat → Option Nat
+  | none, x | x, none => x
+  | some x, some y => some (min x y)
+
+def metricOptAdd : Option Nat → Option Nat → Option Nat
+  | some x, some y => some (x+y)
+  | _, _ => none
+
+theorem metric_cap_min (top : Nat) (x y : Option Nat) :
+    metricCap top (metricOptMin x y) = min (metricCap top x) (metricCap top y) := by
+  cases x <;> cases y <;> simp [metricCap,metricOptMin] <;> omega
+
+theorem metric_cap_add (top : Nat) (x y : Option Nat) :
+    metricCap top (metricOptAdd x y) = min top (metricCap top x + metricCap top y) := by
+  cases x <;> cases y <;> simp [metricCap,metricOptAdd] <;> omega
+
+def floydOptPhase (d : Nat → Nat → Option Nat) (k i j : Nat) : Option Nat :=
+  metricOptMin (d i j) (metricOptAdd (d i k) (d k j))
+
+theorem floyd_cap_phase (d : Nat → Nat → Option Nat) (top k i j : Nat) :
+    metricCap top (floydOptPhase d k i j) =
+      floydPhase (fun i j => metricCap top (d i j)) k i j := by
+  unfold floydOptPhase floydPhase
+  rw [metric_cap_min,metric_cap_add]
+  cases h : d i j <;> simp [metricCap,h] <;> omega
+
+-- A zero-distance representative is safe even when two actual vertices
+-- have distinct names: their rows and columns agree by triangle.
+theorem zero_metric_row (d : Nat → Nat → Nat)
+    (triangle : ∀ i k j, d i j ≤ d i k+d k j)
+    (sym : ∀ i j, d i j = d j i) {a b : Nat} (zero : d a b = 0) :
+    ∀ x, d a x = d b x := by
+  intro x
+  have h := triangle a b x
+  have q := triangle b a x
+  rw [sym b a,zero] at q
+  omega
+
+#print axioms floyd_run_triangle
+#print axioms floyd_run_sym
+#print axioms floyd_cells_exact
+#print axioms floyd_cap_phase
+#print axioms zero_metric_row
+
+end IslandLogistics
+
+namespace IslandLogistics
+
+-- This is the append-on-first-discovery loop used by cut(), components()
+-- and the road-only flood in the tree constructor. Each neighbor list
+-- may contain duplicates (e.g. several ferry cliques).
+def freshNeighbors : List Nat → List Nat → List Nat
+  | [], _ => []
+  | b::bs, seen => if b ∈ seen then freshNeighbors bs seen
+      else b::freshNeighbors bs (seen++[b])
+
+theorem fresh_neighbors_mem (bs seen : List Nat) (x : Nat) :
+    x ∈ seen ++ freshNeighbors bs seen ↔ x ∈ seen ∨ x ∈ bs := by
+  induction bs generalizing seen with
+  | nil => simp [freshNeighbors]
+  | cons b bs ih =>
+    by_cases he : b ∈ seen
+    · simp only [freshNeighbors,if_pos he]
+      rw [ih]
+      simp only [List.mem_cons]
+      constructor
+      · intro h
+        rcases h with h | h
+        · exact Or.inl h
+        · exact Or.inr (Or.inr h)
+      · intro h
+        rcases h with h | h
+        · exact Or.inl h
+        · rcases h with h | h
+          · subst x; exact Or.inl he
+          · exact Or.inr h
+    · simp only [freshNeighbors,if_neg he]
+      rw [show seen ++ b :: freshNeighbors bs (seen++[b]) =
+        (seen++[b]) ++ freshNeighbors bs (seen++[b]) by simp]
+      rw [ih]
+      simp only [List.mem_append,List.mem_singleton,List.mem_cons]
+      constructor <;> intro h
+      · rcases h with (h | h) | h
+        · exact Or.inl h
+        · exact Or.inr (Or.inl h)
+        · exact Or.inr (Or.inr h)
+      · rcases h with h | h | h
+        · exact Or.inl (Or.inl h)
+        · exact Or.inl (Or.inr h)
+        · exact Or.inr h
+
+theorem fresh_neighbors_nodup (bs seen : List Nat) (nd : seen.Nodup) :
+    (seen ++ freshNeighbors bs seen).Nodup := by
+  induction bs generalizing seen with
+  | nil => simpa [freshNeighbors] using nd
+  | cons b bs ih =>
+    by_cases he : b ∈ seen
+    · simpa [freshNeighbors,he] using ih seen nd
+    · have hnd : (seen++[b]).Nodup :=
+        (perm_move_front b seen []).nodup_iff.mp
+          (List.nodup_cons.mpr ⟨he,nd⟩)
+      have h := ih (seen++[b]) hnd
+      simpa [freshNeighbors,he,List.append_assoc] using h
+
+inductive FloodReach (adj : Nat → List Nat) (root : Nat) : Nat → Prop where
+  | start : FloodReach adj root root
+  | next {a b : Nat} : FloodReach adj root a → b ∈ adj a → FloodReach adj root b
+
+structure FloodInvariant (adj : Nat → List Nat) (root n : Nat)
+    (done todo : List Nat) : Prop where
+  nodup : (done++todo).Nodup
+  bounded : ∀ x ∈ done++todo, x < n
+  reached : ∀ x ∈ done++todo, FloodReach adj root x
+  rootSeen : root ∈ done++todo
+  closedDone : ∀ a ∈ done, ∀ b ∈ adj a, b ∈ done++todo
+
+theorem flood_initial (adj : Nat → List Nat) (root n : Nat) (hr : root < n) :
+    FloodInvariant adj root n [] [root] := by
+  constructor
+  · simp
+  · intro x hx; simp at hx; simpa [hx] using hr
+  · intro x hx; simp at hx; subst x; exact FloodReach.start
+  · simp
+  · simp
+
+theorem flood_process (adj : Nat → List Nat) (root n : Nat)
+    (bounded : ∀ a b, a < n → b ∈ adj a → b < n)
+    (done todo : List Nat) (a : Nat)
+    (inv : FloodInvariant adj root n done (a::todo)) :
+    FloodInvariant adj root n (done++[a])
+      (todo++freshNeighbors (adj a) (done++a::todo)) := by
+  let seen := done++a::todo
+  have ha : a ∈ seen := by simp [seen]
+  have eq : (done++[a]) ++ (todo++freshNeighbors (adj a) seen) =
+      seen ++ freshNeighbors (adj a) seen := by simp [seen,List.append_assoc]
+  constructor
+  · rw [eq]
+    exact fresh_neighbors_nodup _ _ inv.nodup
+  · intro x hx
+    rw [eq,fresh_neighbors_mem] at hx
+    rcases hx with h | h
+    · exact inv.bounded x h
+    · exact bounded a x (inv.bounded a ha) h
+  · intro x hx
+    rw [eq,fresh_neighbors_mem] at hx
+    rcases hx with h | h
+    · exact inv.reached x h
+    · exact FloodReach.next (inv.reached a ha) h
+  · rw [eq,fresh_neighbors_mem]
+    exact Or.inl inv.rootSeen
+  · intro x hx b hb
+    rw [eq,fresh_neighbors_mem]
+    rcases List.mem_append.mp hx with hx | hx
+    · exact Or.inl (inv.closedDone x hx b hb)
+    · simp at hx
+      subst x
+      exact Or.inr hb
+
+def floodLoop (adj : Nat → List Nat) : Nat → List Nat → List Nat → List Nat × List Nat
+  | 0, done, todo => (done,todo)
+  | _+1, done, [] => (done,[])
+  | fuel+1, done, a::todo =>
+    floodLoop adj fuel (done++[a]) (todo++freshNeighbors (adj a) (done++a::todo))
+
+theorem flood_complete (adj : Nat → List Nat) (root n : Nat)
+    (bounded : ∀ a b, a < n → b ∈ adj a → b < n)
+    (fuel : Nat) (done todo : List Nat)
+    (inv : FloodInvariant adj root n done todo)
+    (enough : n ≤ fuel+done.length) :
+    (floodLoop adj fuel done todo).2 = [] ∧
+      FloodInvariant adj root n (floodLoop adj fuel done todo).1 [] := by
+  induction fuel generalizing done todo with
+  | zero =>
+    have hlen := ride_cover_length (done++todo) (List.range n) inv.nodup
+      (by intro x hx; exact List.mem_range.mpr (inv.bounded x hx))
+    simp only [List.length_append,List.length_range] at hlen
+    have ht : todo.length = 0 := by omega
+    have he : todo = [] := by simpa using ht
+    subst todo
+    exact ⟨rfl,inv⟩
+  | succ fuel ih =>
+    cases todo with
+    | nil => exact ⟨rfl,inv⟩
+    | cons a todo =>
+      have h := flood_process adj root n bounded done todo a inv
+      have hen : n ≤ fuel+(done++[a]).length := by
+        simp
+        omega
+      exact ih _ _ h hen
+
+def floodSet (adj : Nat → List Nat) (n root : Nat) : List Nat :=
+  (floodLoop adj n [] [root]).1
+
+theorem flood_set_certificate (adj : Nat → List Nat) (n root : Nat)
+    (hr : root < n) (bounded : ∀ a b, a < n → b ∈ adj a → b < n) :
+    root ∈ floodSet adj n root ∧
+      (∀ a ∈ floodSet adj n root, FloodReach adj root a) ∧
+      (∀ a ∈ floodSet adj n root, ∀ b ∈ adj a, b ∈ floodSet adj n root) := by
+  have h := (flood_complete adj root n bounded n [] [root]
+    (flood_initial adj root n hr) (by simp)).2
+  simpa [floodSet] using And.intro h.rootSeen (And.intro h.reached h.closedDone)
+
+theorem flood_set_exact (adj : Nat → List Nat) (n root : Nat)
+    (hr : root < n) (bounded : ∀ a b, a < n → b ∈ adj a → b < n) (x : Nat) :
+    x ∈ floodSet adj n root ↔ FloodReach adj root x := by
+  obtain ⟨hs,reach,closed⟩ := flood_set_certificate adj n root hr bounded
+  constructor
+  · exact reach x
+  · intro hx
+    induction hx with
+    | start => exact hs
+    | next prior hmem ih => exact closed _ ih _ hmem
+
+-- Removing one undirected road and flooding yields a side which no
+-- remaining edge can cross. In particular every positive-slot ferry
+-- clique is on one side. Distinct removed edges yield a disjoint
+-- charge partition, even when their vertex sets are nested.
+structure BridgeSideCertificate (w : World) where
+  a : Nat
+  b : Nat
+  side : Nat → Bool
+  split : side a ≠ side b
+  others : ∀ x y, w.road x y →
+    ¬ ((x=a ∧ y=b) ∨ (x=b ∧ y=a)) → side x = side y
+  ferries : ∀ f x y, 0 < w.slots f → w.route f x → w.route f y →
+    side x = side y
+
+theorem flood_edge_side (adj : Nat → List Nat) (n root : Nat)
+    (hr : root < n) (bounded : ∀ a b, a < n → b ∈ adj a → b < n)
+    (x y : Nat) (xy : y ∈ adj x) (yx : x ∈ adj y) :
+    (floodSet adj n root).contains x = (floodSet adj n root).contains y := by
+  have closed := (flood_set_certificate adj n root hr bounded).2.2
+  cases hx : (floodSet adj n root).contains x <;>
+    cases hy : (floodSet adj n root).contains y
+  · rfl
+  · have h := closed y (by simpa using hy) x yx
+    have hx' : (floodSet adj n root).contains x = true := by simpa using h
+    rw [hx] at hx'
+    contradiction
+  · have h := closed x (by simpa using hx) y xy
+    have hy' : (floodSet adj n root).contains y = true := by simpa using h
+    rw [hy] at hy'
+    contradiction
+  · rfl
+
+theorem flood_bridge_certificate (w : World) (adj : Nat → List Nat)
+    (a b : Nat) (ha : a < w.locations)
+    (bounded : ∀ x y, x < w.locations → y ∈ adj x → y < w.locations)
+    (split : b ∉ floodSet adj w.locations a)
+    (roads : ∀ x y, w.road x y → ¬ ((x=a ∧ y=b) ∨ (x=b ∧ y=a)) →
+      y ∈ adj x ∧ x ∈ adj y)
+    (ferries : ∀ f x y, 0 < w.slots f → w.route f x → w.route f y →
+      y ∈ adj x ∧ x ∈ adj y) :
+    ∃ c : BridgeSideCertificate w, c.a = a ∧ c.b = b ∧
+      c.side = (fun x => (floodSet adj w.locations a).contains x) := by
+  let side := fun x => (floodSet adj w.locations a).contains x
+  have h1 : side a = true := by
+    exact List.contains_eq_mem.mpr ((flood_set_certificate adj w.locations a ha bounded).1)
+  have h2 : side b = false := by
+    cases h : side b
+    · rfl
+    · exact False.elim (split (by simpa [side] using h))
+  refine ⟨⟨a,b,side,by rw [h1,h2]; decide,?_,?_⟩,rfl,rfl,rfl⟩
+  · intro x y hr hn
+    exact flood_edge_side adj w.locations a ha bounded x y (roads x y hr hn).1 (roads x y hr hn).2
+  · intro f x y hs hx hy
+    exact flood_edge_side adj w.locations a ha bounded x y (ferries f x y hs hx hy).1 (ferries f x y hs hx hy).2
+
+def sameRemoved {w : World} (c : BridgeSideCertificate w) (x y : Nat) : Prop :=
+  (x=c.a ∧ y=c.b) ∨ (x=c.b ∧ y=c.a)
+
+def UniqueRemoved {w : World} : List (BridgeSideCertificate w) → Prop
+  | [] => True
+  | c::cs => (∀ d ∈ cs, ¬ sameRemoved d c.a c.b) ∧ UniqueRemoved cs
+
+theorem bridge_side_delta_le (w : World) (cs : List (BridgeSideCertificate w))
+    (unique : UniqueRemoved cs) (x y : Nat) (hr : w.road x y) :
+    (cs.map (fun c => sideDelta c.side x y)).sum ≤ 1 := by
+  induction cs with
+  | nil => simp
+  | cons c cs ih =>
+    have hu := unique.1
+    by_cases he : sameRemoved c x y
+    · have hz : (cs.map (fun d => sideDelta d.side x y)).sum = 0 := by
+        apply sum_map_eq_zero
+        intro d hd
+        have hn : ¬ sameRemoved d x y := by
+          intro h
+          apply hu d hd
+          rcases he with ⟨hx,hy⟩ | ⟨hx,hy⟩
+          · simpa [hx,hy] using h
+          · rcases h with ⟨ha,hb⟩ | ⟨ha,hb⟩
+            · exact Or.inr ⟨hy.symm.trans hb,hx.symm.trans ha⟩
+            · exact Or.inl ⟨hy.symm.trans hb,hx.symm.trans ha⟩
+        simp [sideDelta,d.others x y hr hn]
+      simp only [List.map_cons,List.sum_cons,hz,Nat.add_zero,sideDelta]
+      split <;> omega
+    · have hb := ih unique.2
+      simp [sideDelta,c.others x y hr he,hb]
+
+def certifiedBridgeSystem (w : World) (cs : List (BridgeSideCertificate w))
+    (unique : UniqueRemoved cs) : RoadCutSystem w where
+  cuts := cs.map BridgeSideCertificate.side
+  road := by
+    intro x y hr
+    simpa only [List.map_map,Function.comp_def] using bridge_side_delta_le w cs unique x y hr
+  ferry := by
+    intro side hs f x y hk hx hy
+    obtain ⟨c,hc,rfl⟩ := List.mem_map.mp hs
+    exact c.ferries f x y hk hx hy
+
+#print axioms flood_complete
+#print axioms flood_set_exact
+#print axioms flood_bridge_certificate
+#print axioms certifiedBridgeSystem
+
+end IslandLogistics
