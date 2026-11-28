@@ -72,3 +72,16 @@ These are proof arguments, not an exact executable refinement. The existing priv
 ## Verification decision
 
 Do not mark the universal target complete, and do not merge this research PR as an end-to-end certificate. Intermediate failed proof elaborations were repaired; the checked revision above is green. The Python candidate and original course search remain unchanged. Finite oracle tests are evidence, never the universal proof.
+
+## 2026-11-28 — additional checked constructor, arithmetic, trace and pruning results
+
+Checked proof revision: `ae72ab85c7069d5053e4aa896557682b638c934e`.
+[Successful Lean 4.19.0 run](https://github.com/NRG-Wardog/math/actions/runs/46130802947): 265 printed axiom-dependency records, no sorryAx or nonstandard axioms. These supersede the earlier count, not the PARTIAL status.
+
+- Floyd-Warshall phase/cap and in-place scan equivalence; flood reachability/completeness; true bridge cut and disjoint road-cut charge certificates. Exact source adjacency and all tree/geo constructors still need refinement.
+- Explicit Bellman path certificate, injective/reversible count transfers, capped min-plus, conditional DirectCut signed-integer guards, load-proposal guard, and conditional evaluator branch composition. The complete Python-generated arc sets, array recurrences and all dtype guards remain to be related to these definitions.
+- Full loaded ferry priority: independent actions commute with the first selected ferry movement/service in a goal path, preserving cost and final state in the model. Other priority rules and the composition of all successor filters remain open.
+- Fleet completed-port capacity budget, exact port-stock conservation and actual-trace instantiation of the HubPortTrace bound. The per-port cargo/bin premises, global fleet/road/service partition and actual DFS/Gray-code integration still require exact linking.
+- Signed truck/parcel encoding round trips and injectivity; capacity clipping preserves every legal step and path (including zero weight/capacity). Finite state tuple equality and the actual canonical-key reconstruction and projected cache keys still require full formal refinement.
+
+The original Python candidate is unchanged. No universal admissibility or end-to-end A* certificate is claimed. This PR must remain unmerged as an end-to-end certificate.
