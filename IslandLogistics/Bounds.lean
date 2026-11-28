@@ -11719,8 +11719,8 @@ inductive FerryProgress (w : World) (f : Nat) : State → State → Nat → Prop
 theorem ferry_progress_legal (w : World) (f : Nat) {s u : State} {c : Nat}
     (p : FerryProgress w f s u c) : Step w s u c 0 := by
   cases p with
-  | sail s b hr hn hv => exact Step.sail s f b hr hn hv
-  | leave s t ht hv => exact Step.disembark s t f ht hv
+  | sail b hr hn hv => exact Step.sail s f b hr hn hv
+  | leave t ht hv => exact Step.disembark s t f ht hv
 
 theorem ferry_full_classify (w : World) (f : Nat) {s u : State} {m h : Nat}
     (st : Step w s u m h) (full : occupancy w s f = w.slots f) :
@@ -11746,12 +11746,12 @@ theorem advance_ferry_progress (w : World) (f : Nat) {s u v : State}
     {m h c : Nat} (other : OtherStep w f s u m h) (progress : FerryProgress w f u v c) :
     ∃ z, FerryProgress w f s z c ∧ OtherStep w f z v m h := by
   cases progress with
-  | sail u b hr hn hv =>
+  | sail b hr hn hv =>
     have hs : s.ferry f ≠ b := by
       rw [← other_preserves_ferry w f other]
       exact hn
     exact ⟨sailAt s f b,FerryProgress.sail s b hr hs hv,other_commutes w f b other⟩
-  | leave u t ht hv =>
+  | leave t ht hv =>
     have hs := (other_passenger_iff w f t other).mp ht
     exact ⟨earlyLeave s t f,FerryProgress.leave s t hs hv,other_early_leave w f t other hs⟩
 
@@ -11770,7 +11770,7 @@ theorem full_loaded_ferry_priority (w : World) (f t p : Nat)
     · have hf := (other_occupancy_same w f other).trans full
       have ht' := (other_passenger_iff w f t other).mpr ht
       have hp' := other_aboard_cargo w f t p other ht hp
-      obtain ⟨z,c,d,hprog,hpath,hm⟩ := ih hf ht' hp'
+      obtain ⟨z,c,d,hprog,hpath,hm⟩ := ih done hf ht' hp'
       obtain ⟨z',hprog',ho⟩ := advance_ferry_progress w f other hprog
       exact ⟨z',c,a+d,hprog',Path.cons (other_is_step w f ho) hpath,by omega⟩
     · subst b
