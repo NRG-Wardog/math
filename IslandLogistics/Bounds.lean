@@ -11438,7 +11438,6 @@ theorem count_transfer_reverse (x : Nat → Nat) (a b amount : Nat) (fit : amoun
     by_cases he : b = a
     · subst b
       simp
-      omega
     · simp [he]
   funext z
   have h1 := count_transfer_balance x a b amount z fit
