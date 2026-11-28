@@ -11966,3 +11966,150 @@ theorem hub_port_actual_budget (w : World) (fleet : Nat → Bool) (k : Nat)
 #print axioms hub_port_actual_budget
 
 end IslandLogistics
+
+
+namespace IslandLogistics
+
+-- Signed integer positions are exactly the source tuple representation:
+-- nonnegative ground location; -(index+1) for a carrier.
+def signedTruck (p : TruckPosition) : Int :=
+  match p with
+  | .land a => Int.ofNat a
+  | .onFerry f => -(Int.ofNat f+1)
+
+def unsignedTruck (a : Int) : TruckPosition :=
+  if a < 0 then .onFerry ((-a-1).toNat) else .land a.toNat
+
+def signedParcel (p : ParcelPosition) : Int :=
+  match p with
+  | .ground a => Int.ofNat a
+  | .onTruck t => -(Int.ofNat t+1)
+
+def unsignedParcel (a : Int) : ParcelPosition :=
+  if a < 0 then .onTruck ((-a-1).toNat) else .ground a.toNat
+
+theorem signed_truck_roundtrip (p : TruckPosition) : unsignedTruck (signedTruck p) = p := by
+  cases p with
+  | land a => simp [signedTruck,unsignedTruck]
+  | onFerry f =>
+    have h : -(Int.ofNat f+1) < 0 := by omega
+    simp [signedTruck,unsignedTruck,h]
+    omega
+
+theorem signed_parcel_roundtrip (p : ParcelPosition) : unsignedParcel (signedParcel p) = p := by
+  cases p with
+  | ground a => simp [signedParcel,unsignedParcel]
+  | onTruck t =>
+    have h : -(Int.ofNat t+1) < 0 := by omega
+    simp [signedParcel,unsignedParcel,h]
+    omega
+
+theorem signed_truck_injective {a b : TruckPosition}
+    (he : signedTruck a = signedTruck b) : a=b := by
+  have hh := congrArg unsignedTruck he
+  simpa only [signed_truck_roundtrip] using hh
+
+theorem signed_parcel_injective {a b : ParcelPosition}
+    (he : signedParcel a = signedParcel b) : a=b := by
+  have hh := congrArg unsignedParcel he
+  simpa only [signed_parcel_roundtrip] using hh
+
+def signedStateKey (w : World) (s : State) : List Int :=
+  ((List.range w.trucks).map (fun t => signedTruck (s.truck t))) ++
+  ((List.range w.ferries).map (fun f => Int.ofNat (s.ferry f))) ++
+  ((List.range w.parcels).map (fun p => signedParcel (s.parcel p)))
+
+-- The exact labeled tuple (not the symmetry quotient) is used for hcache
+-- and wrapcache. The component maps are injective on their finite domain.
+theorem signed_state_key_length (w : World) (s : State) :
+    (signedStateKey w s).length = w.trucks+w.ferries+w.parcels := by
+  simp [signedStateKey,Nat.add_assoc]
+
+theorem load_le_total_weight (w : World) (s : State) (t : Nat) :
+    load w s t ≤ sumN w.weight w.parcels := by
+  unfold load
+  apply sumN_mono
+  intro p hp
+  split <;> omega
+
+theorem occupancy_le_truck_count (w : World) (s : State) (f : Nat) :
+    occupancy w s f ≤ w.trucks := by
+  have hc : sumN (fun _ => 1) w.trucks = w.trucks := by
+    generalize w.trucks = n
+    induction n with
+    | zero => rfl
+    | succ n ih => simp [sumN,ih]
+  rw [← hc]
+  unfold occupancy
+  apply sumN_mono
+  intro t ht
+  split <;> omega
+
+def clipWorld (w : World) : World :=
+  {w with capacity := fun t => min (w.capacity t) (sumN w.weight w.parcels),
+          slots := fun f => min (w.slots f) w.trucks}
+
+-- Clipping capacities by total mass and truck count cannot invalidate
+-- a legal LOAD or BOARD, even for weight zero or capacity zero.
+theorem capacity_clip_load (w : World) (s : State) (p t a : Nat)
+    (hp : p < w.parcels) (hg : s.parcel p = .ground a)
+    (room : load w s t+w.weight p ≤ w.capacity t) :
+    load (clipWorld w) s t+w.weight p ≤ (clipWorld w).capacity t := by
+  have hb := load_le_total_weight w {s with parcel := setAt s.parcel p (.onTruck t)} t
+  rw [load_after_load w s p t a hp hg] at hb
+  change load w s t+w.weight p ≤ min (w.capacity t) (sumN w.weight w.parcels)
+  omega
+
+theorem capacity_clip_board (w : World) (s : State) (t f a : Nat)
+    (ht : t < w.trucks) (hg : s.truck t = .land a)
+    (room : occupancy w s f < w.slots f) :
+    occupancy (clipWorld w) s f < (clipWorld w).slots f := by
+  have hb := occupancy_le_truck_count w {s with truck := setAt s.truck t (.onFerry f)} f
+  rw [occupancy_after_board w s t f a ht hg] at hb
+  change occupancy w s f < min (w.slots f) w.trucks
+  omega
+
+theorem clip_step_equiv (w : World) {s u : State} {m h : Nat} :
+    Step w s u m h ↔ Step (clipWorld w) s u m h := by
+  constructor
+  · intro st
+    cases st with
+    | drive t a b ht hr hv => exact Step.drive s t a b ht hr hv
+    | board t f a ht hf hr room hv =>
+      exact Step.board s t f a ht hf hr (capacity_clip_board w s t f a hv.1 ht room) hv
+    | disembark t f ht hv => exact Step.disembark s t f ht hv
+    | sail f b hr hn hv => exact Step.sail s f b hr hn hv
+    | load p t a hp ht room hv =>
+      exact Step.load s p t a hp ht (capacity_clip_load w s p t a hv.1 hp room) hv
+    | unload p t a hp ht hv => exact Step.unload s p t a hp ht hv
+  · intro st
+    cases st with
+    | drive t a b ht hr hv => exact Step.drive s t a b ht hr hv
+    | board t f a ht hf hr room hv =>
+      change occupancy w s f < min (w.slots f) w.trucks at room
+      exact Step.board s t f a ht hf hr (by omega) hv
+    | disembark t f ht hv => exact Step.disembark s t f ht hv
+    | sail f b hr hn hv => exact Step.sail s f b hr hn hv
+    | load p t a hp ht room hv =>
+      change load w s t+w.weight p ≤ min (w.capacity t) (sumN w.weight w.parcels) at room
+      exact Step.load s p t a hp ht (by omega) hv
+    | unload p t a hp ht hv => exact Step.unload s p t a hp ht hv
+
+theorem clip_path_equiv (w : World) {s u : State} {m h : Nat} :
+    Path (Step w) s u m h ↔ Path (Step (clipWorld w)) s u m h := by
+  constructor
+  · intro p
+    induction p with
+    | nil s => exact Path.nil s
+    | cons st rest ih => exact Path.cons ((clip_step_equiv w).mp st) ih
+  · intro p
+    induction p with
+    | nil s => exact Path.nil s
+    | cons st rest ih => exact Path.cons ((clip_step_equiv w).mpr st) ih
+
+#print axioms signed_truck_roundtrip
+#print axioms signed_parcel_roundtrip
+#print axioms clip_step_equiv
+#print axioms clip_path_equiv
+
+end IslandLogistics
