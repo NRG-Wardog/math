@@ -11128,16 +11128,7 @@ theorem fresh_neighbors_mem (bs seen : List Nat) (x : Nat) :
       rw [show seen ++ b :: freshNeighbors bs (seen++[b]) =
         (seen++[b]) ++ freshNeighbors bs (seen++[b]) by simp]
       rw [ih]
-      simp only [List.mem_append,List.mem_singleton,List.mem_cons]
-      constructor <;> intro h
-      · rcases h with (h | h) | h
-        · exact Or.inl h
-        · exact Or.inr (Or.inl h)
-        · exact Or.inr (Or.inr h)
-      · rcases h with h | h | h
-        · exact Or.inl (Or.inl h)
-        · exact Or.inl (Or.inr h)
-        · exact Or.inr h
+      simp [List.mem_append,or_assoc]
 
 theorem fresh_neighbors_nodup (bs seen : List Nat) (nd : seen.Nodup) :
     (seen ++ freshNeighbors bs seen).Nodup := by
@@ -11146,9 +11137,10 @@ theorem fresh_neighbors_nodup (bs seen : List Nat) (nd : seen.Nodup) :
   | cons b bs ih =>
     by_cases he : b ∈ seen
     · simpa [freshNeighbors,he] using ih seen nd
-    · have hnd : (seen++[b]).Nodup :=
-        (perm_move_front b seen []).nodup_iff.mp
-          (List.nodup_cons.mpr ⟨he,nd⟩)
+    · have hnd' : (b::(seen++[])).Nodup := by
+        simpa only [List.append_nil] using (List.nodup_cons.mpr ⟨he,nd⟩)
+      have hnd : (seen++[b]).Nodup :=
+        (perm_move_front b seen []).nodup_iff.mp hnd'
       have h := ih (seen++[b]) hnd
       simpa [freshNeighbors,he,List.append_assoc] using h
 
@@ -11305,7 +11297,7 @@ theorem flood_bridge_certificate (w : World) (adj : Nat → List Nat)
       c.side = (fun x => (floodSet adj w.locations a).contains x) := by
   let side := fun x => (floodSet adj w.locations a).contains x
   have h1 : side a = true := by
-    exact List.contains_eq_mem.mpr ((flood_set_certificate adj w.locations a ha bounded).1)
+    simpa [side] using (flood_set_certificate adj w.locations a ha bounded).1
   have h2 : side b = false := by
     cases h : side b
     · rfl
@@ -11343,10 +11335,15 @@ theorem bridge_side_delta_le (w : World) (cs : List (BridgeSideCertificate w))
             · exact Or.inr ⟨hy.symm.trans hb,hx.symm.trans ha⟩
             · exact Or.inl ⟨hy.symm.trans hb,hx.symm.trans ha⟩
         simp [sideDelta,d.others x y hr hn]
-      simp only [List.map_cons,List.sum_cons,hz,Nat.add_zero,sideDelta]
+      change sideDelta c.side x y + (cs.map (fun d => sideDelta d.side x y)).sum ≤ 1
+      rw [hz,Nat.add_zero]
+      unfold sideDelta
       split <;> omega
     · have hb := ih unique.2
-      simp [sideDelta,c.others x y hr he,hb]
+      change sideDelta c.side x y + (cs.map (fun d => sideDelta d.side x y)).sum ≤ 1
+      have hzero : sideDelta c.side x y = 0 := by simp [sideDelta,c.others x y hr he]
+      rw [hzero,Nat.zero_add]
+      exact hb
 
 def certifiedBridgeSystem (w : World) (cs : List (BridgeSideCertificate w))
     (unique : UniqueRemoved cs) : RoadCutSystem w where
